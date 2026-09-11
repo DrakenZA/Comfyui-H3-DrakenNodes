@@ -182,7 +182,7 @@ Cost estimate: windows per step = about `(length - window) / stride + 1`. 30 s a
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone <this repo> Comfyui-H3-DrakenNodes
+git clone https://github.com/DrakenZA/Comfyui-H3-DrakenNodes.git
 ```
 
 No extra Python dependencies (torch, torchaudio and ComfyUI core only). Requires a ComfyUI with native MiniMax H3
@@ -197,7 +197,7 @@ support (August 2026 or newer, `MiniMaxH3AddGuide` present).
 !pip install -q -r requirements.txt
 
 # 2. this pack
-!git clone <this repo> custom_nodes/Comfyui-H3-DrakenNodes
+!git clone https://github.com/DrakenZA/Comfyui-H3-DrakenNodes.git custom_nodes/Comfyui-H3-DrakenNodes
 
 # 3. weights from Comfy-Org/MiniMax-H3 (top-level folders: diffusion_models/, text_encoders/, vae/)
 !pip install -q huggingface_hub

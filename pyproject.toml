@@ -6,5 +6,5 @@ license = {text = "MIT"}
 dependencies = []
 
 [tool.comfy]
-PublisherId = ""
+PublisherId = "drakenza"
 DisplayName = "H3 DrakenNodes"
