@@ -27,7 +27,7 @@ renders measured through August 2026) and [ckinpdx/ComfyUI-MMH3Tools](https://gi
 * **Guide clips are cropped, not dropped.** A multi-frame `MiniMaxH3AddGuide` clip that crosses a window seam is
   cropped to whole token cycles and shifted; guide audio is cropped to the window's ticks. The toolkit keeps or
   drops a keyframe by its start index only.
-* **Footage extension in one node.** `H3 Long AV Latent` writes the encoded tail of existing footage into the head of
+* **Footage extension in one node.** `H3 Latent with Extend` writes the encoded tail of existing footage into the head of
   the long latent under the model's native denoise mask. The toolkit reaches the same state through
   `H3EncodeAV` + `H3LatentPin`, or via its chunked pipeline.
 * **VRAM budgeted per window** when `expected_total_frames` is set (core's own wrapper skips packed latents).
@@ -109,7 +109,7 @@ All five nodes are under **Add Node → DrakenNodes → H3** (search "Draken" or
 | Node | What it does |
 | --- | --- |
 | **H3 Context Windows (Draken)** (model patch) | Installs the handler. `window_frames` (default 141 = 5.9 s), `stride_frames` (default 51), fuse method, phase alternation, FreeNoise, per-region prompts. `expected_total_frames` lets it budget VRAM per window instead of per full latent. Outputs an info string. |
-| **H3 Long AV Latent, footage prefix (Draken)** | Builds the long empty AV latent (snapped to `17k+5`, and with `snap_length_to_audio_grid` to an audio-exact length). Three ways to seed it: `prefix_latent` (a previous H3 AV latent, e.g. the last KSampler output; its tail is copied straight in, no VAEs), or `prefix_frames` + `vae` (footage encoded), optionally with `prefix_audio` + `audio_vae`. The last `prefix_context_frames` (default 39) become a hard masked prefix, with optional feathering. Audio is only taken when something is wired into `prefix_audio` / from the latent; otherwise H3 generates it. Outputs the latent, the number of prefix frames to trim later, and an info string. |
+| **H3 Latent with Extend (Draken)** | Builds the long empty AV latent (snapped to `17k+5`, and with `snap_length_to_audio_grid` to an audio-exact length). Three ways to seed it: `prefix_latent` (a previous H3 AV latent, e.g. the last KSampler output; its tail is copied straight in, no VAEs), or `prefix_frames` + `vae` (footage encoded), optionally with `prefix_audio` + `audio_vae`. The last `prefix_context_frames` (default 39) become a hard masked prefix, with optional feathering. Audio is only taken when something is wired into `prefix_audio` / from the latent; otherwise H3 generates it. Outputs the latent, the number of prefix frames to trim later, and an info string. |
 | **H3 Audio Lock, long latent (Draken)** | Pins a real soundtrack into the whole long latent (from an offset, with strength) so only video is generated: one continuous track, lip sync and beats across the entire duration. Ported from the toolkit. |
 | **H3 Window Plan (Draken)** | Prints the window schedule for a length / window / stride, or (`windows -> length`) the audio-exact length that gives N clean windows with no clamped last window. |
 | **H3 Trim Prefix, image+audio (Draken)** | Drops the footage prefix from the decoded frames and the matching seconds of audio. |
@@ -130,7 +130,7 @@ MiniMax H3 Image to Video (clip, vae, prompt, width, height, first_frame = last 
   (ignore its LATENT output)
 
 Load Video -> Get Video Components (images, audio)
-  -> H3 Long AV Latent (width, height, length_frames, vae, audio_vae, prefix_frames = images, prefix_audio = audio)
+  -> H3 Latent with Extend (width, height, length_frames, vae, audio_vae, prefix_frames = images, prefix_audio = audio)
   -> KSampler.latent_image        (steps 20, cfg 1.0, res_multistep / simple, denoise 1.0)
 
 KSampler -> VAE Decode (video vae)      -> images
@@ -155,7 +155,7 @@ Notes:
 `example_workflows/h3_extend_footage_api.json` is the graph above in ComfyUI API format (run it with the API or
 adapt it in the editor). `h3_extend_footage_ref2va_api.json` is the same extension on the **Ref2VA** checkpoint:
 `MiniMax H3 Reference to Video` supplies the conditioning (reference stills for identity, `<Picture N>` prompt,
-`length` set to the long length because it also caps reference videos), and `H3 Long AV Latent (Draken)` supplies
+`length` set to the long length because it also caps reference videos), and `H3 Latent with Extend (Draken)` supplies
 the latent with the footage prefix. No keyframes are used; reference blocks ride into every window.
 
 ## Parameters that matter

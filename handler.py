@@ -153,7 +153,7 @@ class H3ContextHandler(cw.IndexListContextHandler):
         latent_shapes = self._get_latent_shapes(conds)
         if latent_shapes is None or len(latent_shapes) != 2 or len(latent_shapes[0]) != 5:
             raise ValueError("H3 Context Windows needs a MiniMax H3 audio-video latent "
-                             "(Empty MiniMax H3 AV Latent / H3 Long AV Latent)")
+                             "(Empty MiniMax H3 AV Latent / H3 Latent with Extend)")
         latents = list(comfy.utils.unpack_latents(x_in, latent_shapes))
         T = latents[0].shape[VIDEO_DIM]
         if T % G.TOKENS_PER_CYCLE != 2:

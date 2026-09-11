@@ -1,4 +1,4 @@
-"""ComfyUI nodes: H3 Context Windows, H3 Long AV Latent, H3 Audio Lock, H3 Window Plan, H3 Trim Prefix AV."""
+"""ComfyUI nodes: H3 Context Windows, H3 Latent with Extend, H3 Audio Lock, H3 Window Plan, H3 Trim Prefix AV."""
 
 import logging
 
@@ -373,7 +373,7 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "DrakenH3ContextWindows": "H3 Context Windows (Draken)",
-    "DrakenH3LongAVLatent": "H3 Long AV Latent, footage prefix (Draken)",
+    "DrakenH3LongAVLatent": "H3 Latent with Extend (Draken)",
     "DrakenH3AudioLock": "H3 Audio Lock, long latent (Draken)",
     "DrakenH3WindowPlan": "H3 Window Plan (Draken)",
     "DrakenH3TrimPrefixAV": "H3 Trim Prefix, image+audio (Draken)",
