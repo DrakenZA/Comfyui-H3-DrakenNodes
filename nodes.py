@@ -1,4 +1,4 @@
-"""ComfyUI nodes: H3 Context Windows, H3 Latent with Extend, H3 Audio Lock, H3 Window Plan, H3 Trim Prefix AV."""
+"""ComfyUI nodes: H3 Context Windows, H3 Latent with Extend, H3 Audio Lock, H3 Window Plan, H3 Trim Prefix Content."""
 
 import logging
 
@@ -341,26 +341,68 @@ class H3WindowPlan:
 
 
 class H3TrimPrefixAV:
+    """Drop the footage prefix from decoded frames/audio, or from an H3 AV latent.
+
+    Images and audio are trimmed exactly. A latent can only be cut on whole token cycles (17 frames = 5 tokens),
+    otherwise the remaining latent starts mid-cycle and is no longer a valid H3 clip. So the latent trim is
+    rounded DOWN to a multiple of 17 frames, and `remaining_frames` says how many frames are still to be trimmed
+    in pixel space after decoding (feed it into a second Trim on the images/audio).
+    """
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {"prefix_frames": ("INT", {"default": 0, "min": 0, "max": 100000})},
-            "optional": {"images": ("IMAGE",), "audio": ("AUDIO",)},
+            "required": {"prefix_frames": ("INT", {"default": 0, "min": 0, "max": 100000,
+                                                  "tooltip": "prefix_frames_used from H3 Latent with Extend."})},
+            "optional": {"images": ("IMAGE",), "audio": ("AUDIO",),
+                         "latent": ("LATENT", {"tooltip": "H3 AV latent (video+audio). Trimmed on the 17-frame token grid; see remaining_frames."})},
         }
 
-    RETURN_TYPES = ("IMAGE", "AUDIO")
+    RETURN_TYPES = ("IMAGE", "AUDIO", "LATENT", "INT", "STRING")
+    RETURN_NAMES = ("images", "audio", "latent", "remaining_frames", "info")
     FUNCTION = "trim"
     CATEGORY = "DrakenNodes/H3"
-    DESCRIPTION = "Drop the footage prefix (frames and the matching seconds of audio) from a decoded H3 result."
+    DESCRIPTION = "Drop the footage prefix from decoded frames and audio (exact), or from an H3 AV latent (on the 17-frame token grid)."
 
-    def trim(self, prefix_frames, images=None, audio=None):
+    def trim(self, prefix_frames, images=None, audio=None, latent=None):
+        prefix_frames = max(0, int(prefix_frames))
+        info = []
+        remaining = 0
         if images is not None and prefix_frames > 0:
             images = images[prefix_frames:]
+            info.append(f"images: dropped {prefix_frames} frames")
         if audio is not None and prefix_frames > 0:
             sr = int(audio["sample_rate"])
             n = int(round(prefix_frames / G.FPS * sr))
             audio = {"waveform": audio["waveform"][..., n:], "sample_rate": sr}
-        return (images, audio)
+            info.append(f"audio: dropped {prefix_frames / G.FPS:.3f}s")
+        if latent is not None and prefix_frames > 0:
+            samples = latent["samples"]
+            if not getattr(samples, "is_nested", False) or len(samples.unbind()) != 2:
+                raise ValueError("latent must be an H3 AV latent (video + audio together)")
+            v, a = samples.unbind()
+            cycles = prefix_frames // G.FRAMES_PER_CYCLE
+            tok = cycles * G.TOKENS_PER_CYCLE
+            cut_frames = cycles * G.FRAMES_PER_CYCLE
+            remaining = prefix_frames - cut_frames
+            if tok >= v.shape[2]:
+                raise ValueError("prefix covers the whole latent")
+            ticks = G.audio_ticks_for_frames(cut_frames)
+            out = dict(latent)
+            out["samples"] = comfy.nested_tensor.NestedTensor((v[:, :, tok:], a[..., ticks:]))
+            nm = latent.get("noise_mask")
+            if nm is not None and getattr(nm, "is_nested", False):
+                mv, ma = nm.unbind()
+                out["noise_mask"] = comfy.nested_tensor.NestedTensor((mv[:, :, tok:], ma[..., ticks:]))
+            latent = out
+            info.append(f"latent: dropped {tok} video tokens ({cut_frames} frames) and {ticks} audio ticks; "
+                        f"{v.shape[2] - tok} tokens = {G.tokens_to_frames(v.shape[2] - tok)} frames remain")
+            if remaining:
+                info.append(f"{remaining} prefix frames are left in the latent (not on the token grid); "
+                            f"trim them from the decoded images/audio with remaining_frames")
+            if not G.is_av_exact(cut_frames):
+                info.append("note: cut length is not audio-exact; audio trim rounded to the nearest tick")
+        return (images, audio, latent, remaining, "\n".join(info))
 
 
 NODE_CLASS_MAPPINGS = {
@@ -376,5 +418,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "DrakenH3LongAVLatent": "H3 Latent with Extend (Draken)",
     "DrakenH3AudioLock": "H3 Audio Lock, long latent (Draken)",
     "DrakenH3WindowPlan": "H3 Window Plan (Draken)",
-    "DrakenH3TrimPrefixAV": "H3 Trim Prefix, image+audio (Draken)",
+    "DrakenH3TrimPrefixAV": "H3 Trim Prefix Content (Draken)",
 }

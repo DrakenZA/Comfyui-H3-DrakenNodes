@@ -112,7 +112,7 @@ All five nodes are under **Add Node → DrakenNodes → H3** (search "Draken" or
 | **H3 Latent with Extend (Draken)** | Builds the long empty AV latent (snapped to `17k+5`, and with `snap_length_to_audio_grid` to an audio-exact length). Three ways to seed it: `prefix_latent` (a previous H3 AV latent, e.g. the last KSampler output; its tail is copied straight in, no VAEs), or `prefix_frames` + `vae` (footage encoded), optionally with `prefix_audio` + `audio_vae`. The last `prefix_context_frames` (default 39) become a hard masked prefix, with optional feathering. Audio is only taken when something is wired into `prefix_audio` / from the latent; otherwise H3 generates it. Outputs the latent, the number of prefix frames to trim later, and an info string. |
 | **H3 Audio Lock, long latent (Draken)** | Pins a real soundtrack into the whole long latent (from an offset, with strength) so only video is generated: one continuous track, lip sync and beats across the entire duration. Ported from the toolkit. |
 | **H3 Window Plan (Draken)** | Prints the window schedule for a length / window / stride, or (`windows -> length`) the audio-exact length that gives N clean windows with no clamped last window. |
-| **H3 Trim Prefix, image+audio (Draken)** | Drops the footage prefix from the decoded frames and the matching seconds of audio. |
+| **H3 Trim Prefix Content (Draken)** | Drops the footage prefix from decoded frames and audio (exact), or from an H3 AV latent (cut on the 17-frame token grid; `remaining_frames` tells you what is left to trim after decoding). |
 
 ## Wiring
 
@@ -135,7 +135,7 @@ Load Video -> Get Video Components (images, audio)
 
 KSampler -> VAE Decode (video vae)      -> images
          -> VAE Decode Audio (audio vae) -> audio
-  -> H3 Trim Prefix (prefix_frames_used from the latent node)
+  -> H3 Trim Prefix Content (prefix_frames_used from the latent node)
   -> Create Video (fps 24, audio) -> Save Video
 ```
 

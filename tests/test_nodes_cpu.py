@@ -75,8 +75,17 @@ def test_long_latent_and_trim():
     latent2, used2, _ = node.build(160, 96, 141, False, 39, 0)
     assert used2 == 0 and "noise_mask" not in latent2
     assert latent2["samples"].unbind()[0].shape[2] == 42
-    imgs, aud = H3TrimPrefixAV().trim(39, images=torch.zeros(753, 8, 8, 3), audio={"waveform": torch.zeros(1, 2, 32000 * 10), "sample_rate": 32000})
-    assert imgs.shape[0] == 753 - 39 and aud["waveform"].shape[-1] == 32000 * 10 - 52000
+    imgs, aud, lat, rem, _ = H3TrimPrefixAV().trim(39, images=torch.zeros(753, 8, 8, 3), audio={"waveform": torch.zeros(1, 2, 32000 * 10), "sample_rate": 32000})
+    assert imgs.shape[0] == 753 - 39 and aud["waveform"].shape[-1] == 32000 * 10 - 52000 and lat is None and rem == 0
+    # latent trim: 39 frames -> 2 whole cycles (34 frames = 10 tokens, 57 ticks), 5 frames remain for pixel-space trim
+    _, _, lat, rem, info = H3TrimPrefixAV().trim(39, latent=latent3)
+    lv, la = lat["samples"].unbind()
+    assert lv.shape[2] == v3.shape[2] - 10 and lv.shape[2] % 5 == 2 and la.shape[-1] == a3.shape[-1] - 57 and rem == 5
+    assert torch.equal(lv[0, 0, :2, 0, 0], torch.arange(40, 42, dtype=torch.float32))   # the 2 leftover prefix tokens
+    assert lat["noise_mask"].unbind()[0].shape[2] == lv.shape[2]
+    # 51 frames = exactly 3 cycles: nothing remains
+    _, _, lat51, rem51, _ = H3TrimPrefixAV().trim(51, latent=latent3)
+    assert rem51 == 0 and lat51["samples"].unbind()[0].shape[2] == v3.shape[2] - 15 and lat51["samples"].unbind()[1].shape[-1] == a3.shape[-1] - 85
     text, n, _ = H3WindowPlan().plan("length -> windows", 753, 6, 141, 51)["result"]
     assert n == len(G.plan_window_starts(222, 42, 15))
     print(text)
