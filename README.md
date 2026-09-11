@@ -141,7 +141,7 @@ KSampler -> VAE Decode (video vae)      -> images
 
 Notes:
 
-* Use the same width/height in *Image to Video* and *Long AV Latent*. The Image to Video node's `length` only affects
+* Use the same width/height in *Image to Video* and *H3 Latent with Extend*. The Image to Video node's `length` only affects
   its own (unused) latent; its `first_frame` keyframe lands at frame 0 of the long timeline, which coincides with the
   footage prefix and also shows the frame to the Qwen text encoder.
 * To pin a frame later in the long timeline, add `Add Guide for MiniMax H3` on the **long** latent with `frame_idx`
