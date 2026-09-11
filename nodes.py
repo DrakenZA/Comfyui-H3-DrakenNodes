@@ -135,18 +135,20 @@ class H3LongAVLatent:
                 "width": ("INT", {"default": 1344, "min": 32, "max": MAX_RES, "step": 32}),
                 "height": ("INT", {"default": 768, "min": 32, "max": MAX_RES, "step": 32}),
                 "length_frames": ("INT", {"default": 719, "min": 39, "max": 100000, "step": 17,
-                                          "tooltip": "Total frames at 24 fps (719 = ~30s). Snapped up to 17k+5; with audio_exact also to an integer audio tick count (51n-12)."}),
-                "audio_exact": ("BOOLEAN", {"default": True}),
+                                          "tooltip": "Total frames at 24 fps (719 = ~30s). Snapped up to 17k+5; with snap_length_to_audio_grid also to an integer audio tick count (51n-12)."}),
+                "snap_length_to_audio_grid": ("BOOLEAN", {"default": True,
+                                                          "tooltip": "Round the total length up to a value where the 40 Hz audio latent divides evenly (39, 90, 141 ... 702, 753). Nothing to do with whether footage audio is used."}),
                 "prefix_context_frames": ("INT", {"default": 39, "min": 5, "max": 345, "step": 17,
-                                                  "tooltip": "How many trailing frames of the footage to keep as the hard prefix (snapped to 17k+5; 39 keeps audio exact)."}),
+                                                  "tooltip": "How many trailing frames of the footage / previous latent to keep as the hard prefix (snapped to 17k+5; 39 keeps audio exact)."}),
                 "feather_tokens": ("INT", {"default": 0, "min": 0, "max": 50,
                                            "tooltip": "Latent tokens after the hard prefix that are only partially preserved (soft handoff)."}),
             },
             "optional": {
-                "vae": ("VAE",),
-                "audio_vae": ("VAE",),
-                "prefix_frames": ("IMAGE", {"tooltip": "Existing footage to extend; its last prefix_context_frames are written into the start of the long latent."}),
-                "prefix_audio": ("AUDIO", {"tooltip": "Soundtrack of the footage (same tail is used)."}),
+                "vae": ("VAE", {"tooltip": "Video VAE; only needed with prefix_frames."}),
+                "audio_vae": ("VAE", {"tooltip": "Audio VAE; only needed with prefix_audio."}),
+                "prefix_frames": ("IMAGE", {"tooltip": "Existing footage to extend; its last prefix_context_frames are encoded into the start of the long latent."}),
+                "prefix_audio": ("AUDIO", {"tooltip": "Soundtrack of the footage (same tail is used). Leave unconnected to let H3 generate all audio."}),
+                "prefix_latent": ("LATENT", {"tooltip": "A previous H3 AV latent (video+audio together, e.g. the last KSampler output). Its tail is copied straight into the new latent, no decode/encode. Takes precedence over prefix_frames/prefix_audio; no VAEs needed."}),
             },
         }
 
@@ -156,9 +158,9 @@ class H3LongAVLatent:
     CATEGORY = "DrakenNodes/H3"
     DESCRIPTION = "Long MiniMax H3 AV latent for context-window sampling, optionally seeded with the tail of existing footage as a hard (masked) prefix."
 
-    def build(self, width, height, length_frames, audio_exact, prefix_context_frames, feather_tokens,
-              vae=None, audio_vae=None, prefix_frames=None, prefix_audio=None):
-        total = G.align_frames_av_exact_up(length_frames) if audio_exact else G.align_frames_up(length_frames)
+    def build(self, width, height, length_frames, snap_length_to_audio_grid, prefix_context_frames, feather_tokens,
+              vae=None, audio_vae=None, prefix_frames=None, prefix_audio=None, prefix_latent=None):
+        total = G.align_frames_av_exact_up(length_frames) if snap_length_to_audio_grid else G.align_frames_up(length_frames)
         T = G.frames_to_tokens(total)
         Ta = G.audio_ticks_for_frames(total)
         lat_h, lat_w = height // 16, width // 16
@@ -175,43 +177,68 @@ class H3LongAVLatent:
             LOG.warning(info[-1])
         used = 0
 
-        if prefix_frames is not None:
-            if vae is None:
-                raise ValueError("prefix_frames needs the video VAE")
-            avail = int(prefix_frames.shape[0])
+        def _ctx_for(avail_frames):
             ctx = G.align_frames_nearest(prefix_context_frames)
-            while ctx > avail and ctx > 5:
+            while ctx > avail_frames and ctx > 5:
                 ctx -= G.FRAMES_PER_CYCLE
-            if ctx > avail:
-                raise ValueError(f"footage has {avail} frames, need at least 5")
+            if ctx > avail_frames:
+                raise ValueError(f"prefix source has {avail_frames} frames, need at least 5")
             tok = G.frames_to_tokens(ctx)
             if tok >= T:
                 raise ValueError("prefix covers the whole latent; raise length_frames")
-            frames = _resize(prefix_frames[-ctx:], width, height, "center")
-            enc = vae.encode(frames).to(device=dev, dtype=video.dtype)
+            return ctx, tok
+
+        def _write_video(enc, ctx, tok, source):
             if tuple(enc.shape[2:]) != (tok, lat_h, lat_w):
-                raise ValueError(f"video VAE gave {tuple(enc.shape)}, expected [1,24,{tok},{lat_h},{lat_w}]")
-            video[:, :, :tok] = enc[:1]
+                raise ValueError(f"prefix video latent is {tuple(enc.shape)}, expected [1,24,{tok},{lat_h},{lat_w}] "
+                                 f"(width/height must match the source)")
+            video[:, :, :tok] = enc[:1].to(device=dev, dtype=video.dtype)
             vmask[:, :, :tok] = 0.0
             for k in range(min(feather_tokens, T - tok)):
                 vmask[:, :, tok + k] = (k + 1) / (feather_tokens + 1)
-            used = ctx
-            info.append(f"video prefix: last {ctx} frames of footage -> tokens [0,{tok}) hard"
+            info.append(f"video prefix: last {ctx} frames of {source} -> tokens [0,{tok}) hard"
                         + (f", {feather_tokens} feathered tokens" if feather_tokens else ""))
+
+        def _write_audio(aenc, ctx, source):
+            ticks = G.audio_ticks_for_frames(ctx)
+            n = min(ticks, int(aenc.shape[-1]))
+            audio[..., :n] = aenc[:1, ..., -n:].to(device=dev, dtype=audio.dtype)
+            amask[..., :n] = 0.0
+            af = int(round(feather_tokens * G.FRAME_PER_TOKEN[1] * G.AUDIO_HZ / G.FPS))
+            for k in range(min(af, Ta - n)):
+                amask[..., n + k] = (k + 1) / (af + 1)
+            info.append(f"audio prefix: {n} ticks of {source} hard" + (f", {af} feathered" if af else ""))
+            if not G.is_av_exact(ctx):
+                info.append("note: prefix length is not audio-exact; audio prefix rounded to the nearest tick")
+
+        if prefix_latent is not None:
+            src = prefix_latent["samples"]
+            if not getattr(src, "is_nested", False) or len(src.unbind()) != 2:
+                raise ValueError("prefix_latent must be an H3 AV latent (video + audio together)")
+            src_v, src_a = src.unbind()
+            src_frames = G.tokens_to_frames(int(src_v.shape[2]))
+            ctx, tok = _ctx_for(src_frames)
+            # the last `tok` tokens of a 5k+2 latent start on a 5-token boundary, so their frame phase matches the head
+            _write_video(src_v[:, :, src_v.shape[2] - tok:], ctx, tok, "previous latent")
+            _write_audio(src_a, ctx, "previous latent")
+            used = ctx
+            if prefix_frames is not None or prefix_audio is not None:
+                info.append("prefix_frames/prefix_audio ignored: prefix_latent takes precedence")
+        elif prefix_frames is not None:
+            if vae is None:
+                raise ValueError("prefix_frames needs the video VAE")
+            if getattr(vae, "latent_dim", 3) != 3:
+                raise ValueError("vae input got an audio VAE; connect the H3 video VAE here")
+            ctx, tok = _ctx_for(int(prefix_frames.shape[0]))
+            frames = _resize(prefix_frames[-ctx:], width, height, "center")
+            _write_video(vae.encode(frames), ctx, tok, "footage")
+            used = ctx
             if prefix_audio is not None:
                 if audio_vae is None:
                     raise ValueError("prefix_audio needs the audio VAE")
-                ticks = G.audio_ticks_for_frames(ctx)
-                aenc = _encode_audio_tail(audio_vae, prefix_audio, ctx / G.FPS).to(device=dev, dtype=audio.dtype)
-                n = min(ticks, int(aenc.shape[-1]))
-                audio[..., :n] = aenc[:1, ..., -n:]
-                amask[..., :n] = 0.0
-                af = int(round(feather_tokens * G.FRAME_PER_TOKEN[1] * G.AUDIO_HZ / G.FPS))
-                for k in range(min(af, Ta - n)):
-                    amask[..., n + k] = (k + 1) / (af + 1)
-                info.append(f"audio prefix: {n} ticks hard" + (f", {af} feathered" if af else ""))
-                if not G.is_av_exact(ctx):
-                    info.append("note: prefix length is not audio-exact; audio prefix rounded to the nearest tick")
+                if getattr(audio_vae, "latent_dim", 2) != 2:
+                    raise ValueError("audio_vae input got the video VAE; connect the H3 audio VAE (minimax_h3_audio_vae) here")
+                _write_audio(_encode_audio_tail(audio_vae, prefix_audio, ctx / G.FPS), ctx, "footage audio")
         elif prefix_audio is not None:
             info.append("prefix_audio ignored: no prefix_frames given")
 

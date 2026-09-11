@@ -1,11 +1,15 @@
 """Node-level CPU tests with fake VAEs and a fake ModelPatcher."""
 import torch
 
+import comfy.nested_tensor
+
 from h3_drakennodes_pkg import h3_grid as G
 from h3_drakennodes_pkg.nodes import H3ContextWindows, H3LongAVLatent, H3TrimPrefixAV, H3WindowPlan
 
 
 class FakeVideoVAE:
+    latent_dim = 3
+
     def encode(self, images):  # [N,H,W,3] -> [1,24,tok,H/16,W/16]
         n, h, w, _ = images.shape
         tok = G.frames_to_tokens(n)
@@ -14,6 +18,7 @@ class FakeVideoVAE:
 
 class FakeAudioVAE:
     audio_sample_rate = 32000
+    latent_dim = 2
 
     def encode(self, wav):  # [1, L, 2] -> [1,32,2,T] at 40 Hz
         t = int(round(wav.shape[1] / 32000 * 40))
@@ -49,6 +54,23 @@ def test_long_latent_and_trim():
     assert abs(float(vm[0, 0, 12, 0, 0]) - 1 / 3) < 1e-6 and abs(float(vm[0, 0, 13, 0, 0]) - 2 / 3) < 1e-6
     assert torch.all(am[..., :65] == 0) and torch.all(v[:, :, :12] == 0.5) and torch.all(a[..., :65] == 0.25)
     print(info)
+    # prefix from a previous AV latent: last 12 tokens / 65 ticks copied, no VAEs needed
+    prev_v = torch.arange(42, dtype=torch.float32).view(1, 1, 42, 1, 1).expand(1, 24, 42, 6, 10).clone()
+    prev_a = torch.arange(235, dtype=torch.float32).view(1, 1, 1, 235).expand(1, 32, 2, 235).clone()
+    prev = {"samples": comfy.nested_tensor.NestedTensor((prev_v, prev_a))}
+    latent3, used3, info3 = node.build(160, 96, 719, True, 39, 0, prefix_latent=prev, prefix_frames=frames)
+    v3, a3 = latent3["samples"].unbind()
+    assert used3 == 39 and torch.equal(v3[0, 0, :12, 0, 0], torch.arange(30, 42, dtype=torch.float32))
+    assert torch.equal(a3[0, 0, 0, :65], torch.arange(170, 235, dtype=torch.float32))
+    vm3, am3 = latent3["noise_mask"].unbind()
+    assert torch.all(vm3[:, :, :12] == 0) and torch.all(vm3[:, :, 12:] == 1) and torch.all(am3[..., :65] == 0)
+    assert "takes precedence" in info3
+    # wrong VAE on the audio input is caught before core
+    try:
+        node.build(160, 96, 719, True, 39, 0, vae=FakeVideoVAE(), audio_vae=FakeVideoVAE(), prefix_frames=frames, prefix_audio=audio)
+        raise AssertionError("video VAE on audio_vae must fail clearly")
+    except ValueError as e:
+        assert "audio_vae input got the video VAE" in str(e)
     # no footage -> no mask
     latent2, used2, _ = node.build(160, 96, 141, False, 39, 0)
     assert used2 == 0 and "noise_mask" not in latent2

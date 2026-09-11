@@ -92,7 +92,7 @@
       "width": 1344,
       "height": 768,
       "length_frames": 753,
-      "audio_exact": true,
+      "snap_length_to_audio_grid": true,
       "prefix_context_frames": 39,
       "feather_tokens": 0,
       "vae": [
