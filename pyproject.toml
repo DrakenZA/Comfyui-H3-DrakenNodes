@@ -1,0 +1,10 @@
+[project]
+name = "comfyui-h3-drakennodes"
+description = "Joint context-window (rolling window) sampling for MiniMax H3 in ComfyUI: long AV latents, footage extension via masked prefix."
+version = "0.1.0"
+license = {text = "MIT"}
+dependencies = []
+
+[tool.comfy]
+PublisherId = ""
+DisplayName = "H3 DrakenNodes"
