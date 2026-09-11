@@ -65,6 +65,22 @@ def test_long_latent_and_trim():
     vm3, am3 = latent3["noise_mask"].unbind()
     assert torch.all(vm3[:, :, :12] == 0) and torch.all(vm3[:, :, 12:] == 1) and torch.all(am3[..., :65] == 0)
     assert "takes precedence" in info3
+    # H3 Extend Existing Latent: same prefix into a latent we already have, keeping its mask
+    from h3_drakennodes_pkg.nodes import H3ExtendLatent
+    target, _, _ = node.build(160, 96, 719, True, 39, 0)                       # empty 753-frame target, no mask
+    ext, usedx, infox = H3ExtendLatent().extend(target, 39, 2, prefix_latent=prev)
+    xv, xa = ext["samples"].unbind()
+    assert usedx == 39 and xv.shape == v3.shape and torch.equal(xv[0, 0, :12, 0, 0], torch.arange(30, 42, dtype=torch.float32))
+    xm, xam = ext["noise_mask"].unbind()
+    assert torch.all(xm[:, :, :12] == 0) and abs(float(xm[0, 0, 12, 0, 0]) - 1 / 3) < 1e-6 and torch.all(xam[..., :65] == 0)
+    assert torch.all(target["samples"].unbind()[0] == 0)                        # input latent untouched
+    # existing mask is kept: pin the last 10 tokens beforehand, then extend
+    pre_v = torch.ones([1, 1, 222, 6, 10]); pre_v[:, :, -10:] = 0.0
+    masked = {"samples": target["samples"], "noise_mask": comfy.nested_tensor.NestedTensor((pre_v, torch.ones([1, 1, 2, 1255])))}
+    ext2, _, infox2 = H3ExtendLatent().extend(masked, 39, 0, vae=FakeVideoVAE(), prefix_frames=frames)
+    m2 = ext2["noise_mask"].unbind()[0]
+    assert torch.all(m2[:, :, :12] == 0) and torch.all(m2[:, :, -10:] == 0) and torch.all(m2[:, :, 12:-10] == 1)
+    assert "existing mask kept" in infox2
     # wrong VAE on the audio input is caught before core
     try:
         node.build(160, 96, 719, True, 39, 0, vae=FakeVideoVAE(), audio_vae=FakeVideoVAE(), prefix_frames=frames, prefix_audio=audio)
