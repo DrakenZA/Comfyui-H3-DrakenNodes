@@ -1,4 +1,4 @@
-"""ComfyUI nodes: H3 Context Windows, H3 Latent with Extend, H3 Inject Extend, H3 Audio Lock, H3 Window Plan, H3 Trim Prefix Content."""
+"""ComfyUI nodes: H3 Context Windows, H3 Latent with Extend, H3 Inject Extend, H3 Negative Guide, H3 Audio Lock, H3 Window Plan, H3 Trim Prefix Content."""
 
 import logging
 
@@ -325,6 +325,106 @@ def _apply_prefix(video, audio, vmask, amask, prefix_context_frames, feather_tok
     return used
 
 
+class H3NegativeGuide:
+    """Place a guide clip BEFORE target frame 0, on the target grid.
+
+    Stock MiniMaxH3AddGuide treats a negative frame_idx as "count from the end", so a guide can never sit
+    before the clip starts. H3 itself positions guide rows at `cursor + FRAME_RESCALE * resolved_frame_index`
+    and never checks the sign, so a keyframe with a negative index lands temporally before the target while
+    keeping the target's spatial grid: history on the same grid, not a separate reference block. This node
+    appends such a keyframe to the conditioning; nothing is written into the latent.
+
+    Sources, in order of precedence: `prefix_latent` (tail of a previous H3 AV latent, no VAE), or
+    `image` frames + `vae` (last guide_frames, resized/centre-cropped to the target canvas), optionally with
+    `audio` + `audio_vae` (matching tail, placed at the same anchor).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "positive": ("CONDITIONING",),
+                "latent": ("LATENT", {"tooltip": "The target H3 AV latent; sets the canvas the guide is resized to."}),
+                "guide_frames": ("INT", {"default": 39, "min": 5, "max": 345, "step": 17,
+                                         "tooltip": "How many trailing frames of the source become the guide (snapped to 17k+5; 39 keeps audio exact)."}),
+                "gap_frames": ("INT", {"default": 0, "min": 0, "max": 1000,
+                                       "tooltip": "Frames of empty time between the end of the guide and target frame 0. 0 = the guide ends right where the clip starts."}),
+            },
+            "optional": {
+                "vae": ("VAE",),
+                "audio_vae": ("VAE",),
+                "image": ("IMAGE", {"tooltip": "Frames whose tail becomes the guide."}),
+                "audio": ("AUDIO", {"tooltip": "Soundtrack whose matching tail is anchored with the guide."}),
+                "prefix_latent": ("LATENT", {"tooltip": "A previous H3 AV latent; its tail is used directly (must match the target canvas)."}),
+            },
+        }
+
+    RETURN_TYPES = ("CONDITIONING", "STRING")
+    RETURN_NAMES = ("positive", "info")
+    FUNCTION = "guide"
+    CATEGORY = "DrakenNodes/H3"
+    DESCRIPTION = "Anchor a guide clip before frame 0 (negative frame index) so the clip continues from it, without touching the latent."
+
+    def guide(self, positive, latent, guide_frames, gap_frames, vae=None, audio_vae=None, image=None, audio=None, prefix_latent=None):
+        import node_helpers
+        samples = latent["samples"]
+        if not getattr(samples, "is_nested", False) or len(samples.unbind()) != 2:
+            raise ValueError("latent must be an H3 AV latent (video + audio together)")
+        tv, _ = samples.unbind()
+        lat_h, lat_w = int(tv.shape[3]), int(tv.shape[4])
+        width, height = lat_w * 16, lat_h * 16
+        keyframe = None
+        info = []
+
+        if prefix_latent is not None:
+            src = prefix_latent["samples"]
+            if not getattr(src, "is_nested", False) or len(src.unbind()) != 2:
+                raise ValueError("prefix_latent must be an H3 AV latent (video + audio together)")
+            sv, sa = src.unbind()
+            avail = G.tokens_to_frames(int(sv.shape[2]))
+            n = min(G.align_frames_nearest(guide_frames), avail)
+            while (n - 5) % G.FRAMES_PER_CYCLE:
+                n -= 1
+            tok = G.frames_to_tokens(n)
+            if tuple(sv.shape[3:]) != (lat_h, lat_w):
+                raise ValueError(f"prefix_latent canvas is {int(sv.shape[4]) * 16}x{int(sv.shape[3]) * 16}, target is {width}x{height}; they must match")
+            keyframe = {"resolved_frame_index": -(n + int(gap_frames)), "latent": sv[:1, :, sv.shape[2] - tok:].contiguous()}
+            ticks = G.audio_ticks_for_frames(n)
+            if sa.shape[-1] >= 1:
+                keyframe["audio_latent"] = sa[:1, ..., max(0, sa.shape[-1] - ticks):].contiguous()
+            info.append(f"guide from previous latent: last {n} frames ({tok} tokens) + {min(ticks, int(sa.shape[-1]))} audio ticks")
+        elif image is not None:
+            if vae is None:
+                raise ValueError("image needs the video VAE")
+            if getattr(vae, "latent_dim", 3) != 3:
+                raise ValueError("vae input got an audio VAE; connect the H3 video VAE here")
+            avail = int(image.shape[0])
+            n = min(G.align_frames_nearest(guide_frames), avail)
+            while (n - 5) % G.FRAMES_PER_CYCLE:
+                n -= 1
+            if n < 5:
+                raise ValueError("need at least 5 frames for a guide clip")
+            frames = _resize(image[-n:], width, height, "center")
+            keyframe = {"resolved_frame_index": -(n + int(gap_frames)), "latent": vae.encode(frames)}
+            info.append(f"guide from frames: last {n} frames -> {keyframe['latent'].shape[2]} tokens at {width}x{height}")
+            if audio is not None:
+                if audio_vae is None:
+                    raise ValueError("audio needs the audio VAE")
+                if getattr(audio_vae, "latent_dim", 2) != 2:
+                    raise ValueError("audio_vae input got the video VAE; connect the H3 audio VAE here")
+                za = _encode_audio_tail(audio_vae, audio, n / G.FPS)
+                ticks = G.audio_ticks_for_frames(n)
+                keyframe["audio_latent"] = za[:1, ..., max(0, za.shape[-1] - ticks):].contiguous()
+                info.append(f"guide audio: {int(keyframe['audio_latent'].shape[-1])} ticks")
+        else:
+            raise ValueError("connect prefix_latent, or image (+ optional audio)")
+
+        info.append(f"anchored at frame {keyframe['resolved_frame_index']} (ends {int(gap_frames)} frames before frame 0)")
+        info.append("note: keyframe rows are only trained for the FL2VA checkpoint; H3 places them by time without a sign check")
+        out = node_helpers.conditioning_set_values(positive, {"minimax_keyframes": [keyframe]}, append=True)
+        return (out, "\n".join(info))
+
+
 class H3AudioLock:
     """Pin a real soundtrack into the long AV latent so only video is generated.
 
@@ -486,6 +586,7 @@ NODE_CLASS_MAPPINGS = {
     "DrakenH3ContextWindows": H3ContextWindows,
     "DrakenH3LongAVLatent": H3LongAVLatent,
     "DrakenH3ExtendLatent": H3ExtendLatent,
+    "DrakenH3NegativeGuide": H3NegativeGuide,
     "DrakenH3AudioLock": H3AudioLock,
     "DrakenH3WindowPlan": H3WindowPlan,
     "DrakenH3TrimPrefixAV": H3TrimPrefixAV,
@@ -495,6 +596,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "DrakenH3ContextWindows": "H3 Context Windows (Draken)",
     "DrakenH3LongAVLatent": "H3 Latent with Extend (Draken)",
     "DrakenH3ExtendLatent": "H3 Inject Extend (Draken)",
+    "DrakenH3NegativeGuide": "H3 Negative Guide (Draken)",
     "DrakenH3AudioLock": "H3 Audio Lock, long latent (Draken)",
     "DrakenH3WindowPlan": "H3 Window Plan (Draken)",
     "DrakenH3TrimPrefixAV": "H3 Trim Prefix Content (Draken)",

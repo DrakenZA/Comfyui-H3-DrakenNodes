@@ -259,6 +259,12 @@ class H3ContextHandler(cw.IndexListContextHandler):
             alat = kf.get("audio_latent")
             new_kf = None
             local = None
+            if g < 0 and f0 == 0:
+                # "negative guide": history placed before frame 0 on the target grid (H3 Negative Guide node).
+                # It belongs to the first window only and is kept whole, index unchanged.
+                new_kf = dict(kf)
+                keyframes.append(new_kf)
+                continue
             if lat is not None:
                 res = self._crop_guide_video(lat, g, f0, f1)
                 if res is not None:

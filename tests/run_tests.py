@@ -83,6 +83,7 @@ def main():
     test_extras_cpu.test_guide_starting_before_window()
     test_extras_cpu.test_branch_isolation_and_split_conds()
     test_extras_cpu.test_margins()
+    test_extras_cpu.test_negative_guide()
     test_extras_cpu.test_audio_lock_and_plan()
     print("ALL TESTS OK")
 

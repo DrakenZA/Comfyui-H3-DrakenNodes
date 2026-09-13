@@ -1,6 +1,7 @@
 """Halo context, seam probe, guide blocks starting before a window, branch isolation, split conds, audio lock."""
 import torch
 
+import comfy.nested_tensor
 import comfy.utils
 
 from h3_drakennodes_pkg import h3_grid as G
@@ -156,6 +157,40 @@ def test_margins():
     # margins are no-ops on the schedule: same inner starts as without
     h0 = H3ContextHandler(L, S)
     assert [w.index_list[0] for w in h0.get_context_windows(None, torch.zeros(1, 24, 102, 6, 8), {})] == starts
+
+
+def test_negative_guide():
+    from h3_drakennodes_pkg.nodes import H3LongAVLatent, H3NegativeGuide
+    from test_nodes_cpu import FakeVideoVAE
+    target, _, _ = H3LongAVLatent().build(160, 96, 345, True, 39, 0)
+    prev_v = torch.arange(42, dtype=torch.float32).view(1, 1, 42, 1, 1).expand(1, 24, 42, 6, 10).clone()
+    prev_a = torch.arange(235, dtype=torch.float32).view(1, 1, 1, 235).expand(1, 32, 2, 235).clone()
+    prev = {"samples": comfy.nested_tensor.NestedTensor((prev_v, prev_a))}
+    positive = [[torch.zeros(1, 4, 8), {"minimax_keyframes": [{"resolved_frame_index": 0, "latent": torch.zeros(1, 24, 1, 6, 10)}]}]]
+    out, info = H3NegativeGuide().guide(positive, target, 39, 0, prefix_latent=prev)
+    kfs = out[0][1]["minimax_keyframes"]
+    assert len(kfs) == 2 and kfs[0]["resolved_frame_index"] == 0          # existing keyframe kept, appended after
+    kf = kfs[1]
+    assert kf["resolved_frame_index"] == -39 and kf["latent"].shape == (1, 24, 12, 6, 10) and kf["audio_latent"].shape[-1] == 65
+    assert torch.equal(kf["latent"][0, 0, :, 0, 0], torch.arange(30, 42, dtype=torch.float32))
+    out2, _ = H3NegativeGuide().guide(positive, target, 39, 17, vae=FakeVideoVAE(), image=torch.rand(50, 96, 160, 3))
+    assert out2[0][1]["minimax_keyframes"][1]["resolved_frame_index"] == -56
+    # through the context handler: window 0 keeps the history guide whole, later windows drop it
+    conds, shapes, _ = build_conds(345, 6, 10, 16, [dict(kf)])
+    x_in, _ = comfy.utils.pack_latents([torch.randn(shapes[0]), torch.randn(shapes[1])])
+    h = H3ContextHandler(G.frames_to_tokens(141), 15)
+    got = {}
+
+    def hook(win, pl, mc):
+        got[win.index_list[0]] = [(k["resolved_frame_index"], k["latent"].shape[2]) for k in pl["keyframes"]]
+        lay = pl["layout"]
+        if win.index_list[0] == 0:  # guide rows sit before the target on the time axis
+            ca, cb, _ = next(s for s in lay.segments if s[2] == "cond")
+            va, vb, _ = next(s for s in lay.segments if s[2] == "video")
+            assert float(lay.position_ids[ca, 0]) < float(lay.position_ids[va, 0])
+
+    _run(h, conds, x_in, steps=1, hook=hook)
+    assert got[0] == [(-39, 12)] and got[15] == [] and got[30] == []
 
 
 def test_audio_lock_and_plan():
