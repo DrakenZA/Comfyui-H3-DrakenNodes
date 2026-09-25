@@ -115,6 +115,30 @@ All five nodes are under **Add Node → DrakenNodes → H3** (search "Draken" or
 | **H3 Audio Lock, long latent (Draken)** | Pins a real soundtrack into the whole long latent (from an offset, with strength) so only video is generated: one continuous track, lip sync and beats across the entire duration. Ported from the toolkit. |
 | **H3 Window Plan (Draken)** | Prints the window schedule for a length / window / stride, or (`windows -> length`) the audio-exact length that gives N clean windows with no clamped last window. |
 | **H3 Trim Prefix Content (Draken)** | Drops the footage prefix from decoded frames and audio (exact), or from an H3 AV latent (cut on the 17-frame token grid; `remaining_frames` tells you what is left to trim after decoding). |
+| **H3 Progressive Sampler, multi-stage SelfLift (Draken)** | Progressive-resolution sampling after [SelfLift](https://github.com/facok/comfyui-SelfLift) ([paper](https://arxiv.org/abs/2609.02036)), generalised to any sampler and 2-8 stages. See below. |
+
+## H3 Progressive Sampler (multi-stage SelfLift)
+
+Runs the first steps of the schedule at reduced spatial resolution and lifts to full resolution at the end of each
+stage, with SelfLift-zero's artifact-aware consistency lift at every boundary. Wire it like `SamplerCustom`:
+`sampler` + `sigmas` (the full schedule), plus the model's `vae` for the pixel anchor. Works for H3 audio-video
+latents and for 4D image latents of rectified-flow models.
+
+* `stages` (2-8) is a dropdown; picking a number shows `stage_N_steps` and `stage_N_scale` for every stage before
+  the last. The last stage always runs the remaining steps at full resolution. Scales must increase.
+* **Any sampler.** Each stage is a normal sampler run over its slice of the sigmas. At a boundary the last clean
+  prediction (x0) is lifted to the next grid and noised at the boundary sigma; audio keeps the sampler's own state.
+  With Euler and 2 stages this is exactly SelfLift's transition (checked to float rounding against its
+  `progressive_sample` for images, noise masks and AV latents). Multistep samplers (dpmpp_2m, res_multistep, ...)
+  restart their history at each stage; multi-evaluation samplers (heun, dpmpp_2s) spend their last low-res step's
+  extra evaluations on a state that is replaced by the lift.
+* `rho`, `w_min`, `w_max`, `latent_upsample`: the lift, same meaning as in SelfLift, applied at every boundary.
+  H3 SelfLift-zero without an upscaler: start with `rho=0.6`, `w_min=w_max=1`.
+* `upscaler_model`: the learned H3 latent upscaler from `models/latent_upscale_models` for the direct lift. It is
+  loaded through an installed comfyui-SelfLift pack; `none` works without it.
+* `model_hires` (optional) is used for the final full-resolution stage only.
+* `noise_mask` is honoured at every stage (1 = generate, 0 = keep the original content).
+* Not included: SelfLift's experimental high-res tiling. Its TST node is a model patch and works in front of this one.
 
 ## Wiring
 

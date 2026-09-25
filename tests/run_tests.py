@@ -71,6 +71,7 @@ def main():
     import test_handler_cpu
     import test_nodes_cpu
     import test_extras_cpu
+    import test_progressive_cpu
     test_grid.test_basic_grid()
     test_grid.test_plan()
     test_handler_cpu.test_identity_and_phase()
@@ -85,6 +86,11 @@ def main():
     test_extras_cpu.test_margins()
     test_extras_cpu.test_negative_guide()
     test_extras_cpu.test_audio_lock_and_plan()
+    test_progressive_cpu.test_plan_stages()
+    test_progressive_cpu.test_euler_two_stage_equals_manual_selflift_transition()
+    test_progressive_cpu.test_any_sampler_multi_stage_image()
+    test_progressive_cpu.test_noise_mask_keeps_content()
+    test_progressive_cpu.test_nested_av_stages_and_node()
     print("ALL TESTS OK")
 
 
