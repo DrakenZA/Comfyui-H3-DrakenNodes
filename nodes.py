@@ -1,4 +1,4 @@
-"""ComfyUI nodes: H3 Context Windows, H3 Latent with Extend, H3 Inject Extend, H3 Negative Guide, H3 Audio Lock, H3 Window Plan, H3 Trim Prefix Content."""
+"""ComfyUI nodes: H3 Context Windows, H3 Latent with Extend, H3 Inject Extend, H3 Negative Guide, H3 Audio Lock, H3 Window Plan, H3 Trim Prefix Content, H3 Progressive Sampler."""
 
 import logging
 
@@ -9,8 +9,10 @@ import comfy.model_management
 import comfy.nested_tensor
 import comfy.patcher_extension
 import comfy.utils
+from comfy_api.latest import io
 
 from . import h3_grid as G
+from . import progressive as P
 from .handler import H3ContextHandler, make_prepare_sampling_wrapper
 
 LOG = logging.getLogger("h3_context_windows")
@@ -582,6 +584,89 @@ class H3TrimPrefixAV:
         return (images, audio, latent, remaining, "\n".join(info))
 
 
+def _stage_defaults(n, i):
+    """Defaults for stage i (1-based) of an n-stage plan: 2 stages = SelfLift's 6 steps at 0.5."""
+    if n == 2:
+        return 6, 0.5
+    scale = round((0.5 + 0.5 * (i - 1) / (n - 1)) * 20) / 20
+    return (4 if i == 1 else 2), scale
+
+
+def _stage_options():
+    options = []
+    for n in range(2, P.MAX_STAGES + 1):
+        inputs = []
+        for i in range(1, n):
+            steps, scale = _stage_defaults(n, i)
+            inputs.append(io.Int.Input(f"stage_{i}_steps", default=steps, min=1, max=10000,
+                                       tooltip=f"Sampling steps run in stage {i}. The final stage runs the remaining steps at full resolution."))
+            inputs.append(io.Float.Input(f"stage_{i}_scale", default=scale, min=0.1, max=0.95, step=0.05,
+                                         tooltip=f"Spatial scale of stage {i}. Scales must increase from stage to stage."))
+        options.append(io.DynamicCombo.Option(str(n), inputs))
+    return options
+
+
+class H3ProgressiveSampler(io.ComfyNode):
+    """SelfLift-style progressive-resolution sampling with any sampler and any number of stages."""
+
+    @classmethod
+    def define_schema(cls):
+        upscalers = ["none"] + P.list_upscalers()
+        h3 = [u for u in upscalers[1:] if "h3" in u.lower()]
+        return io.Schema(
+            node_id="DrakenH3ProgressiveSampler",
+            display_name="H3 Progressive Sampler, multi-stage SelfLift (Draken)",
+            category="DrakenNodes/H3",
+            description="Sample the first steps at low resolution and lift to full resolution in as many stages as you like, "
+                        "with SelfLift's artifact-aware lift at each boundary. Works with any SAMPLER and SIGMAS, like SamplerCustom.",
+            inputs=[
+                io.Model.Input("model", tooltip="Used for every stage except the last when model_hires is connected."),
+                io.Conditioning.Input("positive"),
+                io.Conditioning.Input("negative"),
+                io.Vae.Input("vae", tooltip="The sampled model's VAE, used for the pixel re-encode anchor (rho > 0)."),
+                io.Latent.Input("latent_image", tooltip="Full-resolution latent (image, or H3 audio-video). Existing content and noise masks are kept."),
+                io.Sampler.Input("sampler", tooltip="Any sampler. Multistep samplers restart their history at each stage."),
+                io.Sigmas.Input("sigmas", tooltip="The full schedule; the stages split it by their step counts."),
+                io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff, control_after_generate=True),
+                io.Float.Input("cfg", default=5.0, min=0.0, max=100.0, step=0.1, round=0.01),
+                io.DynamicCombo.Input("stages", options=_stage_options(),
+                                      tooltip="Number of stages, including the final full-resolution one. Each earlier stage gets its own steps and scale."),
+                io.Float.Input("rho", default=0.0, min=0.0, max=1.0, step=0.05,
+                               tooltip="Share of the most inconsistent locations corrected toward the pixel-VAE anchor at each lift. "
+                                       "0 = direct lift only. SelfLift-zero on H3 without an upscaler: start near 0.6 with w_min = w_max = 1."),
+                io.Float.Input("w_min", default=0.5, min=0.0, max=1.0, step=0.05, tooltip="Correction strength floor inside the selected locations."),
+                io.Float.Input("w_max", default=1.0, min=0.0, max=1.0, step=0.05, tooltip="Correction strength ceiling."),
+                io.Combo.Input("latent_upsample", options=["nearest", "bilinear"], default="nearest",
+                               tooltip="Direct latent lift when no learned upscaler is used (paper: nearest)."),
+                io.Combo.Input("upscaler_model", options=upscalers, default=h3[0] if h3 else "none",
+                               tooltip="Learned H3 latent upscaler (models/latent_upscale_models) for the direct lift of video latents. "
+                                       "Needs comfyui-SelfLift installed. none = latent_upsample."),
+                io.Boolean.Input("upscaler_unload", default=True,
+                                 tooltip="Unload the learned upscaler from VRAM after each lift."),
+                io.Model.Input("model_hires", optional=True,
+                               tooltip="Optional model for the final full-resolution stage (same architecture and latent format)."),
+            ],
+            outputs=[io.Latent.Output()],
+        )
+
+    @classmethod
+    def execute(cls, model, positive, negative, vae, latent_image, sampler, sigmas, seed, cfg, stages,
+                rho, w_min, w_max, latent_upsample, upscaler_model, upscaler_unload, model_hires=None) -> io.NodeOutput:
+        n = int(stages["stages"])
+        plan = [(int(stages[f"stage_{i}_steps"]), float(stages[f"stage_{i}_scale"])) for i in range(1, n)]
+        lifter = None
+        if upscaler_model != "none":
+            lifter = P.learned_lifter(upscaler_model, upscaler_unload)
+            if rho > 0.0 and w_max > 0.0:
+                LOG.warning("H3 Progressive Sampler: rho > 0 with a learned upscaler is a hybrid of the two lifts")
+        elif rho == 0.0 and latent_image["samples"].is_nested:
+            LOG.warning("H3 Progressive Sampler: rho=0 without an upscaler is a plain nearest/bilinear lift; "
+                        "H3 usually needs rho ~0.6 (w_min = w_max = 1) or the learned upscaler")
+        return io.NodeOutput(P.progressive_sample(model, positive, negative, vae, latent_image, sampler, sigmas, seed, cfg,
+                                                  plan, rho, w_min, w_max, latent_upsample, lifter=lifter,
+                                                  model_hires=model_hires))
+
+
 NODE_CLASS_MAPPINGS = {
     "DrakenH3ContextWindows": H3ContextWindows,
     "DrakenH3LongAVLatent": H3LongAVLatent,
@@ -590,6 +675,7 @@ NODE_CLASS_MAPPINGS = {
     "DrakenH3AudioLock": H3AudioLock,
     "DrakenH3WindowPlan": H3WindowPlan,
     "DrakenH3TrimPrefixAV": H3TrimPrefixAV,
+    "DrakenH3ProgressiveSampler": H3ProgressiveSampler,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -600,4 +686,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "DrakenH3AudioLock": "H3 Audio Lock, long latent (Draken)",
     "DrakenH3WindowPlan": "H3 Window Plan (Draken)",
     "DrakenH3TrimPrefixAV": "H3 Trim Prefix Content (Draken)",
+    "DrakenH3ProgressiveSampler": "H3 Progressive Sampler, multi-stage SelfLift (Draken)",
 }
