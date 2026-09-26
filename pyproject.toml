@@ -5,6 +5,9 @@ version = "0.1.0"
 license = {text = "MIT"}
 dependencies = []
 
+[project.optional-dependencies]
+face-mask = ["opencv-python>=4.8", "onnxruntime>=1.20"]
+
 [tool.comfy]
 PublisherId = "drakenza"
 DisplayName = "H3 DrakenNodes"

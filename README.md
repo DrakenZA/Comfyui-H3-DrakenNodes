@@ -1,5 +1,7 @@
 # Comfyui-H3-DrakenNodes
 
+Also includes an independent **Face Occlusion Mask** node based on the XSeg models used by FaceFusion.
+
 MiniMax H3 long-form nodes for ComfyUI: joint context-window sampling, footage extension, audio lock, seam probe.
 Joint context-window sampling for **MiniMax H3** in ComfyUI: one long audio-video latent (30 s, 60 s, more),
 denoised every step as a set of overlapping windows that each look like a normal H3 clip, fused in the overlaps.
@@ -211,8 +213,39 @@ cd ComfyUI/custom_nodes
 git clone https://github.com/DrakenZA/Comfyui-H3-DrakenNodes.git
 ```
 
-No extra Python dependencies (torch, torchaudio and ComfyUI core only). Requires a ComfyUI with native MiniMax H3
-support (August 2026 or newer, `MiniMaxH3AddGuide` present).
+The H3 nodes need no extra Python dependencies (torch, torchaudio and ComfyUI core only). They require a ComfyUI with
+native MiniMax H3 support (August 2026 or newer, `MiniMaxH3AddGuide` present). The separate face mask node has the
+optional dependencies below.
+
+### Face Occlusion Mask
+
+`Face Occlusion Mask (Draken)` takes a ComfyUI `IMAGE` batch and returns a full-size `MASK` batch. White means the
+visible face can be edited; a foreground object crossing it remains black. YuNet finds five landmarks, each face is
+aligned to a 256 x 256 crop, XSeg predicts visible pixels, and the mask is warped back to the input frame. This uses
+the [occlusion model family and approach documented by FaceFusion](https://docs.facefusion.io/usage/cli-arguments/face-masker).
+It does not call FaceFusion or copy its Python code.
+
+Install `opencv-python` and an ONNX Runtime package into **the Python environment running ComfyUI**: `onnxruntime-gpu`
+for compatible CUDA devices, `onnxruntime-directml` for DirectML, or `onnxruntime` for CPU. For CPU:
+
+```bash
+python -m pip install "opencv-python>=4.8" "onnxruntime>=1.20"
+```
+
+The first execution downloads the selected XSeg model (about 70 MB for `xseg_1`) from
+[FaceFusion's model releases](https://github.com/facefusion/facefusion-assets/releases) and the small YuNet model from
+[OpenCV Zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) into
+`ComfyUI/models/facefusion/`. Subsequent executions reuse the files and ONNX session. The node uses an available GPU
+execution provider before CPU. No model weights are included in this repo.
+
+Connect the `MASK` to a masked edit or composite. `faces=all` combines every detected face; `largest` processes just
+the largest face in each image. `detection_size` controls speed versus finding small faces. An optional `base_mask`
+restricts the output to an existing face mask. No face detected produces an all-black mask. Frames are processed
+independently; the node does not track a specific person between frames.
+
+The XSeg weights are marked **GPL-3.0** in [FaceFusion's model metadata](https://github.com/facefusion/facefusion/blob/master/facefusion/face_masker.py),
+and [OpenCV Zoo's YuNet directory](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet)
+states **MIT**. Check those model licenses for your use of downloaded weights.
 
 ### Colab
 
