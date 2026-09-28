@@ -44,16 +44,40 @@ class FaceOcclusionTests(unittest.TestCase):
         base[:, :, :128] = 0
         with mock.patch.object(face_occlusion, "_xseg_session", return_value=(HalfMaskSession(), "input")), \
              mock.patch.object(face_occlusion, "_detect_faces", return_value=[self.face]):
-            result, = face_occlusion.FaceOcclusionMask().make_mask(images, base_mask=base)
+            result, data = face_occlusion.FaceOcclusionMask().make_mask(images, base_mask=base)
         self.assertEqual(tuple(result.shape), (2, 256, 256))
         self.assertEqual(float(result.max()), 0)
+        self.assertEqual(data["frames"], [[], []])
 
     def test_no_detected_face_returns_black(self):
         with mock.patch.object(face_occlusion, "_xseg_session", return_value=(HalfMaskSession(), "input")), \
              mock.patch.object(face_occlusion, "_detect_faces", return_value=[]):
-            result, = face_occlusion.FaceOcclusionMask().make_mask(torch.zeros((1, 32, 48, 3)))
+            result, data = face_occlusion.FaceOcclusionMask().make_mask(torch.zeros((1, 32, 48, 3)))
         self.assertEqual(tuple(result.shape), (1, 32, 48))
         self.assertEqual(float(result.sum()), 0)
+        self.assertEqual(data["frames"], [[]])
+
+    def test_separate_faces_and_disconnected_mask_regions(self):
+        left = np.zeros((40, 80), dtype=np.float32)
+        left[10:20, 10:15] = 1
+        left[10:20, 20:25] = 1  # An obstruction splits one face's visible mask.
+        right = np.zeros_like(left)
+        right[5:15, 50:60] = 1
+        with mock.patch.object(face_occlusion, "_xseg_session", return_value=(HalfMaskSession(), "input")), \
+             mock.patch.object(face_occlusion, "_detect_faces", return_value=[None, None]), \
+             mock.patch.object(face_occlusion, "_mask_one_face", side_effect=[right, left]):
+            combined, data = face_occlusion.FaceOcclusionMask().make_mask(torch.zeros((1, 40, 80, 3)))
+        records = data["frames"][0]
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["bbox"], (10, 10, 25, 20))
+        self.assertEqual(records[1]["bbox"], (50, 5, 60, 15))
+        reconstructed = torch.zeros_like(combined[0])
+        for record in records:
+            x, y = record["mask_origin"]
+            mask = record["mask"]
+            h, w = mask.shape
+            reconstructed[y:y+h, x:x+w] = torch.maximum(reconstructed[y:y+h, x:x+w], mask)
+        self.assertTrue(torch.equal(reconstructed, combined[0]))
 
 
 if __name__ == "__main__":

@@ -219,7 +219,8 @@ optional dependencies below.
 
 ### Face Occlusion Mask
 
-`Face Occlusion Mask (Draken)` takes a ComfyUI `IMAGE` batch and returns a full-size `MASK` batch. White means the
+`Face Occlusion Mask (Draken)` takes a ComfyUI `IMAGE` batch and returns a full-size combined `MASK` batch plus
+separate `face_masks` data for every face in each frame. White means the
 visible face can be edited; a foreground object crossing it remains black. YuNet finds five landmarks, each face is
 aligned to a 256 x 256 crop, XSeg predicts visible pixels, and the mask is warped back to the input frame. This uses
 the [occlusion model family and approach documented by FaceFusion](https://docs.facefusion.io/usage/cli-arguments/face-masker).
@@ -246,6 +247,24 @@ independently; the node does not track a specific person between frames.
 The XSeg weights are marked **GPL-3.0** in [FaceFusion's model metadata](https://github.com/facefusion/facefusion/blob/master/facefusion/face_masker.py),
 and [OpenCV Zoo's YuNet directory](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet)
 states **MIT**. Check those model licenses for your use of downloaded weights.
+
+### Face Mask Squares
+
+`Face Mask Squares (Draken)` draws a separate colored square outline around every face on the original frames.
+Connect the **same IMAGE batch** to both nodes, and connect **Face Occlusion Mask's `face_masks` output** to the
+new node's `face_masks` input. Its `outlined_frames` output is an `IMAGE` batch ready for preview or video assembly.
+The existing combined `MASK` output remains available for editing.
+
+* Colors follow left-to-right face order in each frame: **red, blue, green, yellow, magenta, cyan, orange, purple,
+  pink, teal**, then repeat. This is spatial ordering; people exchanging positions exchange colors.
+* `size_scale = 1.0` fits a square around the mask's visible bounds; `0.8` makes it smaller and `1.2` larger,
+  keeping the same center. Bounds use mask values above `0.5`, so faint feathering does not enlarge the square.
+* `line_width` sets the outline thickness in image pixels.
+* Each frame uses its own face locations. Frames without faces pass through unchanged. Frame counts and image
+  dimensions must match; the input frames are not modified.
+
+Separate face data comes directly from each face's XSeg mask. An object can split a mask into several visible
+pieces without producing several squares for that face. The drawing node needs no additional models.
 
 ### Colab
 

@@ -186,6 +186,19 @@ def _mask_one_face(bgr, face, session, input_name, box_blur):
                           borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
 
+def _face_record(mask):
+    """Keep each mask separate, with its visible bounds and a compact mask crop."""
+    ys, xs = np.nonzero(mask > 0.5)
+    if not len(xs):
+        return None
+    bbox = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+    support_y, support_x = np.nonzero(mask > 0)
+    x0, y0 = int(support_x.min()), int(support_y.min())
+    x1, y1 = int(support_x.max()) + 1, int(support_y.max()) + 1
+    return {"bbox": bbox, "mask_origin": (x0, y0),
+            "mask": torch.from_numpy(mask[y0:y1, x0:x1].copy())}
+
+
 class FaceOcclusionMask:
     @classmethod
     def INPUT_TYPES(cls):
@@ -206,8 +219,8 @@ class FaceOcclusionMask:
             },
         }
 
-    RETURN_TYPES = ("MASK",)
-    RETURN_NAMES = ("visible_face_mask",)
+    RETURN_TYPES = ("MASK", "DRAKEN_FACE_MASKS")
+    RETURN_NAMES = ("visible_face_mask", "face_masks")
     FUNCTION = "make_mask"
     CATEGORY = "DrakenNodes/Face"
     DESCRIPTION = "Full-frame mask of visible face pixels. Foreground objects crossing the face are excluded."
@@ -229,6 +242,7 @@ class FaceOcclusionMask:
 
         session = input_name = None
         masks = []
+        frame_faces = []
         for index, image in enumerate(images):
             rgb = (image[..., :3].detach().clamp(0, 1).mul(255).byte().cpu().numpy())
             bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
@@ -236,12 +250,24 @@ class FaceOcclusionMask:
             if faces == "largest":
                 detections = detections[:1]
             mask = np.zeros((height, width), dtype=np.float32)
+            records = []
+            source_mask = None
+            if base_mask is not None:
+                source = base_mask[0 if base_mask.shape[0] == 1 else index]
+                source_mask = source.detach().clamp(0, 1).cpu().numpy()
             if detections and session is None:
                 session, input_name = _xseg_session(xseg_model)
             for face in detections:
-                mask = np.maximum(mask, _mask_one_face(bgr, face, session, input_name, box_blur))
-            if base_mask is not None:
-                source = base_mask[0 if base_mask.shape[0] == 1 else index]
-                mask *= source.detach().clamp(0, 1).cpu().numpy()
+                face_mask = np.clip(_mask_one_face(bgr, face, session, input_name, box_blur), 0, 1)
+                if source_mask is not None:
+                    face_mask *= source_mask
+                mask = np.maximum(mask, face_mask)
+                record = _face_record(face_mask)
+                if record is not None:
+                    records.append(record)
+            records.sort(key=lambda record: ((record["bbox"][0] + record["bbox"][2]) / 2,
+                                             (record["bbox"][1] + record["bbox"][3]) / 2))
+            frame_faces.append(records)
             masks.append(torch.from_numpy(np.clip(mask, 0, 1)))
-        return (torch.stack(masks),)
+        face_data = {"schema_version": 1, "height": height, "width": width, "frames": frame_faces}
+        return (torch.stack(masks), face_data)
