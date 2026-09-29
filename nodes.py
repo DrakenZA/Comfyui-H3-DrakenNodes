@@ -16,6 +16,7 @@ from . import progressive as P
 from .handler import H3ContextHandler, make_prepare_sampling_wrapper
 from .face_occlusion import FaceOcclusionMask
 from .face_squares import FaceMaskSquares
+from .person_mask import PersonSelection, PersonVideoMask, PersonMaskOverlay
 
 LOG = logging.getLogger("h3_context_windows")
 FUSE_METHODS = ["pyramid", "relative", "flat", "overlap-linear"]
@@ -670,6 +671,9 @@ class H3ProgressiveSampler(io.ComfyNode):
 
 
 NODE_CLASS_MAPPINGS = {
+    "DrakenPersonSelection": PersonSelection,
+    "DrakenPersonVideoMask": PersonVideoMask,
+    "DrakenPersonMaskOverlay": PersonMaskOverlay,
     "DrakenFaceOcclusionMask": FaceOcclusionMask,
     "DrakenFaceMaskSquares": FaceMaskSquares,
     "DrakenH3ContextWindows": H3ContextWindows,
@@ -683,6 +687,9 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "DrakenPersonSelection": "Person Selection (Draken)",
+    "DrakenPersonVideoMask": "Person Video Mask (Draken)",
+    "DrakenPersonMaskOverlay": "Person Mask Overlay (Draken)",
     "DrakenFaceOcclusionMask": "Face Occlusion Mask (Draken)",
     "DrakenFaceMaskSquares": "Face Mask Squares (Draken)",
     "DrakenH3ContextWindows": "H3 Context Windows (Draken)",

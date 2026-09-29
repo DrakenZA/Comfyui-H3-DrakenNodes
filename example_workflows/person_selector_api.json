@@ -1,0 +1,16 @@
+{
+  "1": {"class_type": "LoadVideo", "inputs": {"file": "input.mp4"}},
+  "2": {"class_type": "GetVideoComponents", "inputs": {"video": ["1", 0]}},
+  "3": {"class_type": "DrakenPersonSelection", "inputs": {
+    "images": ["2", 0], "frame_index": 0,
+    "selection": "{\"box\":[0.2,0.1,0.8,0.9],\"points\":[]}"
+  }},
+  "4": {"class_type": "DrakenPersonVideoMask", "inputs": {
+    "images": ["2", 0], "person": ["3", 0], "model": "EdgeTAM", "device": "auto",
+    "offload_state": true, "cache_model": true, "corrections": "[]"
+  }},
+  "5": {"class_type": "DrakenPersonMaskOverlay", "inputs": {
+    "images": ["2", 0], "person_mask": ["4", 0], "mode": "color", "color": "#FF0000", "opacity": 1.0
+  }},
+  "6": {"class_type": "SaveImage", "inputs": {"images": ["5", 1], "filename_prefix": "person_selector/frames"}}
+}

@@ -58,6 +58,8 @@ def main():
     args = ap.parse_args()
     sys.argv = [sys.argv[0], "--cpu"]
     sys.path.insert(0, args.comfy)
+    import comfy.options
+    comfy.options.enable_args_parsing()
     _install_stubs(("comfy_aimdo", "comfy_kitchen"))
     # import the pack as a package under a stable alias (folder name has dashes)
     spec = importlib.util.spec_from_file_location(

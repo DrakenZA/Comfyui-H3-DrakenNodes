@@ -266,6 +266,94 @@ The existing combined `MASK` output remains available for editing.
 Separate face data comes directly from each face's XSeg mask. An object can split a mask into several visible
 pieces without producing several squares for that face. The drawing node needs no additional models.
 
+### Person selector for video (EdgeTAM / SAM 2.1)
+
+Three nodes under **DrakenNodes → Person** select one person, track their visible
+silhouette through a video, and replace it with a color or transparency:
+
+| Node | Inputs / outputs |
+| --- | --- |
+| **Person Selection (Draken)** | Video `images` + a `frame_index`. Queue once to display the frame, then drag a box around the whole person or add include/exclude points. Outputs `person` selection data. |
+| **Person Video Mask (Draken)** | The same `images` + `person`, with an **EdgeTAM** / **SAM 2.1 Tiny** dropdown. Outputs one full-size `person_mask` per frame, in the original order. Tracks forwards and backwards from your selected frame. |
+| **Person Mask Overlay (Draken)** | The same `images` + `person_mask`, hex `color`, `opacity`, and `color` / `transparent` mode. Outputs RGB `preview`, real `rgba_frames`, and `transparency_mask` (1 = transparent). |
+
+Install the optional dependencies **using ComfyUI's Python**, from this repo folder:
+
+```bash
+python -m pip install -e ".[person-mask]"
+```
+
+For Windows portable ComfyUI, use `python_embeded/python.exe` instead of your
+system Python (add `-s`). Requires Python 3.10+, PyTorch 2.3.1+, and a matching
+torchvision build; modern ComfyUI already supplies these. The extra does not
+request a torch upgrade or install a SAM package. Restart ComfyUI and refresh the
+browser after installing so the preview controls load.
+
+Wire the workflow as follows:
+
+```text
+Load Video → Get Video Components.images ─┬→ Person Selection.images
+                                         ├→ Person Video Mask.images
+                                         └→ Person Mask Overlay.images
+Person Selection.person → Person Video Mask.person
+Person Video Mask.person_mask → Person Mask Overlay.person_mask
+```
+
+1. Queue once. The selector displays `frame_index` (zero-based); tracking waits
+   until there is a selection. Choose a frame where the person is clearly visible.
+2. Use **Drag box** around the whole person, **Include point** on their body,
+   and/or **Exclude point** on unwanted areas. Queue again to track the clip.
+3. Choose `color` mode and `opacity=1` to fully replace the visible silhouette.
+   Lower opacity blends the color over the person.
+4. Choose `transparent` mode and `opacity=1` to make the person fully transparent.
+   `preview` shows a checkerboard; **save `rgba_frames` for actual transparency**.
+
+Changing color, opacity, or mode only reruns the overlay; ComfyUI can reuse the
+tracked mask. Changing `frame_index` clears the old selection: queue to refresh
+the preview, select again, then queue to track. Use the exact same frame batch
+and order for all three nodes.
+
+For a normal color video, wire `preview` to **Create Video**, and preserve the
+original FPS and audio from **Get Video Components** before **Save Video**.
+For transparent output, **Save Image** preserves the RGBA PNG sequence. Current
+ComfyUI's **Save WEBM**, with `codec=vp9`, also supports RGBA alpha. H.264/MP4
+does not preserve transparency. Transparency leaves a hole; it does not reconstruct
+the background behind the person.
+
+**Models and memory:** EdgeTAM is the default. Only the selected checkpoint is
+downloaded on first tracking use to `ComfyUI/models/person_segmentation/`:
+`edgetam.pt` (~56 MB) or `sam2.1_hiera_tiny.pt` (~156 MB). Downloads use pinned
+official sources, verify SHA256, and load with `weights_only=True`. You can place
+the official files there manually for offline use. Both models/code are Apache 2.0;
+see [the vendored code notice](vendor/person_sam2/NOTICE.md).
+
+The shared inference subset uses a private import namespace and does not change
+global Hydra state or another node's `sam2` package. No detector, second backbone
+download, video decoder, CUDA compilation, or SAM 3 is required. Frames are resized
+and normalized on demand. `offload_state=true` saves VRAM; `cache_model=true`
+keeps one model on CPU between runs, releasing VRAM after tracking. `auto` uses
+ComfyUI's CUDA device when available, otherwise CPU; long clips still need RAM
+for the original frames, tracking state, and full-resolution output masks.
+
+**Refinements/API:** The selector's `selection` field is normalized JSON, so a
+headless workflow can set `{"box":[0.2,0.1,0.8,0.9],"points":[[0.5,0.5,1]]}`
+directly. `box` is `[left, top, right, bottom]`; each point is `[x,y,label]`
+where 1 includes and 0 excludes. All coordinates are between 0 and 1.
+`Person Video Mask.corrections` optionally adds prompts for the same person on
+other frames, for example `[{"frame_index":12,"points":[[0.5,0.5,1],[0.7,0.5,0]]}]`.
+Use one prompt per frame. This first version selects **one person per tracker
+node**; it segments visible pixels, with no guaranteed recovery after a long
+occlusion or scene cut and no fine hair/soft alpha matting.
+
+Import the [interactive example workflow](example_workflows/person_selector.json)
+into ComfyUI, upload your video in **Load Video**, and follow the selection steps
+above. It saves the RGBA frame sequence; swap the output to **Create Video** for
+a color video or **Save WEBM** (`vp9`) for a transparent video.
+
+An [API example](example_workflows/person_selector_api.json) selects a person
+using an editable normalized box and saves the frame sequence. Replace
+`input.mp4` and the box before queueing it.
+
 ### Colab
 
 ```bash
@@ -303,6 +391,30 @@ An A100 80 GB runs the full int8 diffusion model plus the int8 text encoder. On 
 model and the nvfp4 text encoder. Colab's free T4 (15 GB) is too small for H3.
 
 ## Tests
+
+Person selector contracts run without ComfyUI or downloaded models:
+
+```bash
+python -m unittest discover -s tests -p test_person_mask.py -v
+```
+
+The optional real-model check uses the official EdgeTAM bedroom sample and
+both checkpoints (kept outside this repo):
+
+```bash
+python tests/person_video_smoke.py --reference /path/to/EdgeTAM --models /path/to/checkpoints --output /path/to/results
+```
+
+It checks eight 960×540 frames, forward/reverse tracking from frame 3, unchanged
+background pixels, and real RGBA transparency. Both models passed on CPU with
+PyTorch 2.5.1; that is a correctness test, not a GPU speed comparison.
+
+The live browser test `tests/person_ui_smoke.cjs` passed with ComfyUI 0.37.0 /
+frontend 1.53.6 on CPU (PyTorch 2.10.0). It covers first-queue preview, actual
+pointer box/include/exclude selection, real inference, PNG outputs, and mask
+cache reuse when changing overlay mode. The saved transparent PNG was verified
+as RGBA with both transparent and opaque pixels. CUDA execution has not been
+tested on this machine.
 
 `tests/run_tests.py --comfy /path/to/ComfyUI` runs on CPU against real ComfyUI core with a stand-in model that
 returns `-x` for every window. The fused result must equal `-x` for the whole latent exactly, which validates window
