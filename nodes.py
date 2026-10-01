@@ -16,6 +16,7 @@ from . import progressive as P
 from .handler import H3ContextHandler, make_prepare_sampling_wrapper
 from .face_occlusion import FaceOcclusionMask
 from .face_squares import FaceMaskSquares
+from .face_highlighter import FaceMaskHighlighter
 from .person_mask import PersonSelection, PersonVideoMask, PersonMaskOverlay
 
 LOG = logging.getLogger("h3_context_windows")
@@ -676,6 +677,7 @@ NODE_CLASS_MAPPINGS = {
     "DrakenPersonMaskOverlay": PersonMaskOverlay,
     "DrakenFaceOcclusionMask": FaceOcclusionMask,
     "DrakenFaceMaskSquares": FaceMaskSquares,
+    "DrakenFaceMaskHighlighter": FaceMaskHighlighter,
     "DrakenH3ContextWindows": H3ContextWindows,
     "DrakenH3LongAVLatent": H3LongAVLatent,
     "DrakenH3ExtendLatent": H3ExtendLatent,
@@ -692,6 +694,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "DrakenPersonMaskOverlay": "Person Mask Overlay (Draken)",
     "DrakenFaceOcclusionMask": "Face Occlusion Mask (Draken)",
     "DrakenFaceMaskSquares": "Face Mask Squares (Draken)",
+    "DrakenFaceMaskHighlighter": "Face Mask Highlighter (Draken)",
     "DrakenH3ContextWindows": "H3 Context Windows (Draken)",
     "DrakenH3LongAVLatent": "H3 Latent with Extend (Draken)",
     "DrakenH3ExtendLatent": "H3 Inject Extend (Draken)",
