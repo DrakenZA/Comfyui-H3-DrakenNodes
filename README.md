@@ -266,6 +266,21 @@ The existing combined `MASK` output remains available for editing.
 Separate face data comes directly from each face's XSeg mask. An object can split a mask into several visible
 pieces without producing several squares for that face. The drawing node needs no additional models.
 
+### Face Mask Highlighter
+
+`Face Mask Highlighter (Draken)` fills the actual visible face masks on the original frames with a chosen color.
+Connect the **same IMAGE batch** to Face Occlusion Mask and this node, then connect **Face Occlusion Mask's
+`face_masks` output** to the highlighter's `face_masks` input. Use `highlighted_frames` for preview or video assembly.
+
+* `color` accepts a hex RGB color, such as `#FF0000` (red), `#0000FF` (blue), or `#00FF00` (green).
+* `opacity` ranges from `0` (unchanged) to `1` (full color fill), with `0.5` giving a 50% overlay.
+* All detected faces use the selected color. Occluded areas stay unchanged and soft mask edges stay soft.
+  Overlapping masks use their maximum strength, so overlaps do not become more opaque.
+* Frames without faces pass through unchanged. Frame counts, frame order, and image dimensions must match.
+  Input frames and mask data are not modified; existing image alpha is preserved.
+
+The highlighter reuses the existing mask data and needs no additional models or dependencies.
+
 ### Person selector for video (EdgeTAM / SAM 2.1)
 
 Three nodes under **DrakenNodes → Person** select one person, track their visible
