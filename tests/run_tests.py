@@ -99,6 +99,9 @@ def main():
     test_long_reference_cpu.test_reference_validation_and_optional_vaes()
     test_long_reference_cpu.test_reference_cleanup_and_memory_budget()
     test_long_reference_cpu.test_reference_native_sampler()
+    test_long_reference_cpu.test_reference_source_memory()
+    test_long_reference_cpu.test_reference_cross_pass_cache()
+    test_long_reference_cpu.test_reference_encoding_cache_lifecycle()
     print("ALL TESTS OK")
 
 

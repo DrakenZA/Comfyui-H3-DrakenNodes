@@ -2,9 +2,13 @@
 
 import logging
 import math
+import tempfile
 from dataclasses import dataclass, replace
+from pathlib import Path
 
+import numpy as np
 import torch
+from PIL import Image
 
 import comfy.conds
 import comfy.model_management
@@ -37,6 +41,29 @@ class PreparedReferences:
     total_tokens: int
 
 
+class WindowEncodingCache:
+    """Raw encoder outputs shared by sampler calls, with only file paths kept in RAM."""
+
+    def __init__(self):
+        self.directory = tempfile.TemporaryDirectory(prefix="draken-h3-encodings-")
+        self.paths = {}
+
+    def contains(self, kind, key):
+        return (kind, key) in self.paths
+
+    def store(self, kind, key, data):
+        path = Path(self.directory.name) / f"{kind}-{key[0]}-{key[1]}.pt"
+        try:
+            torch.save(data, path)
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+        self.paths[kind, key] = path
+
+    def load(self, kind, key):
+        return torch.load(self.paths[kind, key], map_location="cpu", weights_only=True)
+
+
 def _audio_slice(audio, start_frame, frame_count):
     sr = audio["sample_rate"]
     first = round(start_frame * sr / G.FPS)
@@ -46,25 +73,70 @@ def _audio_slice(audio, start_frame, frame_count):
     return {"waveform": audio["waveform"][..., first:last], "sample_rate": sr}
 
 
+class ReferenceVideo:
+    """The stock Lanczos result, stored as RGB bytes instead of a retained IMAGE batch."""
+
+    def __init__(self, frames, length):
+        h, w = frames.shape[1:3]
+        self.width, self.height = native.adapt_canvas(w, h)
+        if w * h < self.width * self.height:
+            self.width, self.height = (max(32, round(d / 32) * 32) for d in (w, h))
+        self.length, self.dtype = length, frames.dtype
+        self.frame_bytes = self.width * self.height * 3
+        self.file = tempfile.TemporaryFile()
+        try:
+            for frame in frames[:length]:
+                comfy.model_management.throw_exception_if_processing_interrupted()
+                # Match comfy.utils.lanczos, including its existing 8-bit conversion.
+                pixels = np.clip(255. * frame[..., :3].cpu().numpy(), 0, 255).astype(np.uint8)
+                image = Image.fromarray(pixels).resize((self.width, self.height), Image.Resampling.LANCZOS)
+                self.file.write(image.tobytes())
+            self.file.flush()
+        except BaseException:
+            self.file.close()
+            raise
+
+    def read(self, first, count, step=1):
+        indexes = range(first, first + count, step)
+        result = torch.empty((len(indexes), self.height, self.width, 3), dtype=self.dtype, device="cpu")
+        for i, index in enumerate(indexes):
+            comfy.model_management.throw_exception_if_processing_interrupted()
+            self.file.seek(index * self.frame_bytes)
+            pixels = np.frombuffer(self.file.read(self.frame_bytes), dtype=np.uint8)
+            pixels = pixels.reshape(self.height, self.width, 3).astype(np.float32) / 255.0
+            result[i].copy_(torch.from_numpy(pixels))
+        return result
+
+
 class WindowReferenceSource:
     def __init__(self, clip, vae, audio_vae, prompt, width, height, length,
                  ref_image_size, ref_images, ref_videos, ref_video_audios, ref_audios):
         self.clip, self.vae, self.audio_vae = clip, vae, audio_vae
         self.prompt = prompt
         self.width, self.height, self.length = width, height, length
-        self.videos = {k: v.cpu() for k, v in (ref_videos or {}).items() if v is not None}
-        self.soundtracks = {k: {**v, "waveform": v["waveform"].cpu()}
-                            for k, v in (ref_video_audios or {}).items() if v is not None}
+        self.videos = {}
+        self.soundtracks = {}
         self.images = []
         self.image_refs = []
         self.audio_refs = []
         self.audio_items = []
-        for name, frames in self.videos.items():
+        self.encoding_cache = WindowEncodingCache()
+        for name, frames in (ref_videos or {}).items():
+            if frames is None:
+                continue
             if frames.shape[0] < length:
                 raise ValueError(f"{name} has {frames.shape[0]} frames; synchronized long references need at least {length} frames at 24 fps. Reduce length or supply a longer reference.")
-            soundtrack = self.soundtracks.get("ref_video_audio_" + name.rsplit("_", 1)[-1])
+            audio_name = "ref_video_audio_" + name.rsplit("_", 1)[-1]
+            soundtrack = (ref_video_audios or {}).get(audio_name)
             if soundtrack is not None:
-                _audio_slice(soundtrack, 0, length)
+                cropped = _audio_slice(soundtrack, 0, length)
+                self.soundtracks[audio_name] = None
+                if vae is not None and audio_vae is not None:
+                    waveform = cropped["waveform"]
+                    # A view of a longer track would retain its entire backing storage.
+                    copy = waveform.untyped_storage().nbytes() > waveform.numel() * waveform.element_size()
+                    self.soundtracks[audio_name] = {**cropped, "waveform": waveform.to(device="cpu", copy=copy)}
+            self.videos[name] = ReferenceVideo(frames, length)
         for image in (ref_images or {}).values():
             if image is None:
                 continue
@@ -101,23 +173,17 @@ class WindowReferenceSource:
             raise ValueError("Target windows exceed the reference node's length. Use its latent output or match the reference length to the target.")
         return first, count
 
-    def _segment(self, frames):
-        h, w = frames.shape[1:3]
-        cw, ch = native.adapt_canvas(w, h)
-        if w * h < cw * ch:
-            cw, ch = (max(32, round(d / 32) * 32) for d in (w, h))
-        return native._resize(frames, cw, ch, "disabled")
-
     def encode_window_refs(self, start, tokens):
         first, count = self._window_range(start, tokens)
         refs = list(self.image_refs)
-        for name, frames in self.videos.items():
+        for name, video in self.videos.items():
             if self.vae is None:
                 continue
-            segment = self._segment(frames[first:first + count])
+            segment = video.read(first, count)
             ch, cw = segment.shape[1:3]
             soundtrack = self.soundtracks.get("ref_video_audio_" + name.rsplit("_", 1)[-1])
             z = self.vae.encode(segment).cpu()
+            del segment
             az, ticks = None, 0
             if soundtrack is not None and self.audio_vae is not None:
                 az, ticks = native._encode_ref_audio(self.audio_vae, _audio_slice(soundtrack, first, count))
@@ -132,10 +198,10 @@ class WindowReferenceSource:
         first, count = self._window_range(start, tokens)
         items = list(self.images)
         sample_idx = list(range(0, count, G.FPS // 2))
-        for name, frames in self.videos.items():
+        for name, video in self.videos.items():
             if "ref_video_audio_" + name.rsplit("_", 1)[-1] in self.soundtracks:
                 items.append({"type": "audio"})
-            sampled = self._segment(frames[first:first + count:G.FPS // 2])
+            sampled = video.read(first, count, G.FPS // 2)
             items.append({"type": "video", "data": sampled,
                           "timestamps": [i / 2.0 for i in range(len(sample_idx))]})
         return self.encode_text(items + self.audio_items)
@@ -144,6 +210,34 @@ class WindowReferenceSource:
         refs = self.encode_window_refs(start, tokens)
         embeds, tags = self.encode_window_text(start, tokens)
         return ReferenceWindow(embeds, tags, refs)
+
+    def prepare_windows(self, plan):
+        cache = self.encoding_cache
+        missing_refs = [key for key in plan if not cache.contains("refs", key)]
+        missing_text = [key for key in plan if not cache.contains("text", key)]
+        LOG.info("H3 long reference: reusing %d/%d VAE and %d/%d Qwen windows",
+                 len(plan) - len(missing_refs), len(plan), len(plan) - len(missing_text), len(plan))
+        for i, key in enumerate(missing_refs):
+            comfy.model_management.throw_exception_if_processing_interrupted()
+            LOG.info("H3 long reference: VAE window %d/%d, frames %d-%d", i + 1, len(missing_refs),
+                     G.token_frame_offset(key[0]), G.token_frame_offset(key[0]) + G.tokens_to_frames(key[1]))
+            refs = self.encode_window_refs(*key)
+            # Shared images and standalone audio already belong to the source.
+            cache.store("refs", key, refs[len(self.image_refs):len(refs) - len(self.audio_refs)])
+            del refs
+        for i, key in enumerate(missing_text):
+            comfy.model_management.throw_exception_if_processing_interrupted()
+            LOG.info("H3 long reference: Qwen window %d/%d", i + 1, len(missing_text))
+            embeds, tags = self.encode_window_text(*key)
+            cache.store("text", key, {"embeds": embeds, "tags": tags})
+            del embeds, tags
+        entries = {}
+        for key in plan:
+            comfy.model_management.throw_exception_if_processing_interrupted()
+            text = cache.load("text", key)
+            refs = self.image_refs + cache.load("refs", key) + self.audio_refs
+            entries[key] = ReferenceWindow(text["embeds"], text["tags"], refs)
+        return entries
 
 
 class H3LongReferenceToVideo(io.ComfyNode):
@@ -194,10 +288,12 @@ def make_reference_sampling_wrapper(handler):
     def wrapper(executor, noise, latent_image, sampler, sigmas, *args, latent_shapes=None, **kwargs):
         guider = executor.class_obj
         original = guider.conds
-        sources = [c["model_conds"][REFERENCE_KEY].cond for cs in original.values() for c in cs
-                   if REFERENCE_KEY in c.get("model_conds", {})]
-        if not sources:
+        if not any(REFERENCE_KEY in c.get("model_conds", {}) for cs in original.values() for c in cs):
             return executor(noise, latent_image, sampler, sigmas, *args, latent_shapes=latent_shapes, **kwargs)
+        skip_negative = math.isclose(guider.cfg, 1.0) and not guider.model_options.get("disable_cfg1_optimization", False)
+        active = {branch: cs for branch, cs in original.items() if branch != "negative" or not skip_negative}
+        sources = [c["model_conds"][REFERENCE_KEY].cond for cs in active.values() for c in cs
+                   if REFERENCE_KEY in c.get("model_conds", {})]
         if latent_shapes is None or len(latent_shapes) != 2 or len(latent_shapes[0]) != 5:
             raise ValueError("H3 long references require a native H3 audio/video latent.")
         total = latent_shapes[0][2]
@@ -209,22 +305,12 @@ def make_reference_sampling_wrapper(handler):
                     continue
                 if G.tokens_to_frames(total) != source.length:
                     raise ValueError("Reference length and target latent length differ. Match length or use the long reference node's latent output.")
-                refs = {}
-                for i, key in enumerate(plan):
-                    comfy.model_management.throw_exception_if_processing_interrupted()
-                    LOG.info("H3 long reference: VAE window %d/%d, frames %d-%d", i + 1, len(plan),
-                             G.token_frame_offset(key[0]), G.token_frame_offset(key[0]) + G.tokens_to_frames(key[1]))
-                    refs[key] = source.encode_window_refs(*key)
-                entries = {}
-                for i, key in enumerate(plan):
-                    comfy.model_management.throw_exception_if_processing_interrupted()
-                    LOG.info("H3 long reference: Qwen window %d/%d", i + 1, len(plan))
-                    embeds, tags = source.encode_window_text(*key)
-                    entries[key] = ReferenceWindow(embeds, tags, refs[key])
+                entries = source.prepare_windows(plan)
                 origin = max(e.embeds.shape[1] + sum(_ref_t_span(r) for r in e.refs) for e in entries.values())
                 tables[source] = PreparedReferences(entries, origin, total)
             guider.conds = {}
-            for branch, conds in original.items():
+            zero_tables = {}
+            for branch, conds in active.items():
                 guider.conds[branch] = []
                 for cond in conds:
                     cond = cond.copy()
@@ -237,9 +323,18 @@ def make_reference_sampling_wrapper(handler):
                             raise ValueError("H3 long reference embeddings were modified. Use prompts in the reference node; Conditioning Combine and Conditioning Zero Out are supported.")
                         table = tables[source]
                         if zeroed:
-                            table = replace(table, windows={k: replace(e, embeds=torch.zeros_like(e.embeds))
-                                                            for k, e in table.windows.items()})
-                        # Use the largest encoded presentation for core's memory estimate.
+                            if source not in zero_tables:
+                                zeros = {}
+                                windows = {}
+                                for k, e in table.windows.items():
+                                    shape = tuple(e.embeds.shape), e.embeds.dtype
+                                    if shape not in zeros:
+                                        zeros[shape] = torch.zeros_like(e.embeds)
+                                    windows[k] = replace(e, embeds=zeros[shape])
+                                zero_tables[source] = replace(table, windows=windows)
+                                del zeros
+                            table = zero_tables[source]
+                        # Core requires one presentation before per-window replacement.
                         entry = max(table.windows.values(), key=lambda e: e.embeds.shape[1])
                         cond.update(cross_attn=entry.embeds,
                                     minimax_refs=entry.refs, minimax_token_tags=entry.tags)
@@ -260,6 +355,7 @@ def make_reference_sampling_wrapper(handler):
 def make_reference_prepare_wrapper():
     def wrapper(executor, model, noise_shape, conds, *args, **kwargs):
         real_model, prepared_conds, models = executor(model, noise_shape, conds, *args, **kwargs)
+        groups = {}
         seen = set()
         for cs in prepared_conds.values():
             for cond in cs:
@@ -270,7 +366,18 @@ def make_reference_prepare_wrapper():
                     if id(entry) in seen:
                         continue
                     seen.add(id(entry))
-                    entry.embeds = real_model.diffusion_model.preprocess_text_embeds(
-                        entry.embeds.to(device=model.load_device, dtype=real_model.get_dtype_inference())).cpu()
+                    groups.setdefault(id(entry.embeds), []).append(entry)
+        for entries in groups.values():
+            embeds = real_model.diffusion_model.preprocess_text_embeds(
+                entries[0].embeds.to(device=model.load_device, dtype=real_model.get_dtype_inference())).cpu()
+            for entry in entries:
+                entry.embeds = embeds
+        for cs in prepared_conds.values():
+            for cond in cs:
+                marker = cond.get("model_conds", {}).get(REFERENCE_KEY)
+                if marker is not None:
+                    # Reuse the refined presentation, releasing the raw representative
+                    # and avoiding a second projection in native extra_conds.
+                    cond["cross_attn"] = max(marker.cond.windows.values(), key=lambda e: e.embeds.shape[1]).embeds
         return real_model, prepared_conds, models
     return wrapper

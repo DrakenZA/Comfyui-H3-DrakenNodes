@@ -1,6 +1,10 @@
 """Window reference integration against native node schemas, layouts and cond processing."""
 
 from types import SimpleNamespace
+from pathlib import Path
+import gc
+import weakref
+from unittest.mock import patch
 
 import torch
 
@@ -72,23 +76,24 @@ class AudioVAE:
 
 
 class Diffusion(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, offset=0.25):
         super().__init__()
         self.calls = 0
         self.dtype = torch.float32
+        self.offset = offset
 
     def preprocess_text_embeds(self, states):
         if states.shape[-1] == 12:
             return states
         self.calls += 1
-        return torch.nn.functional.pad(states + 0.25, (0, 4))
+        return torch.nn.functional.pad(states + self.offset, (0, 4))
 
 
-def _model(shapes):
+def _model(shapes, offset=0.25):
     # Exercise native MiniMaxH3.extra_conds without allocating model weights.
     model = comfy.model_base.MiniMaxH3.__new__(comfy.model_base.MiniMaxH3)
     torch.nn.Module.__init__(model)
-    model.diffusion_model = Diffusion()
+    model.diffusion_model = Diffusion(offset)
     model.concat_keys = ()
     model.manual_cast_dtype = None
     model.latent_shapes = shapes
@@ -152,7 +157,7 @@ def test_reference_schema_and_segments():
     assert torch.equal(stock[0][1]["minimax_token_tags"], entry.tags)
 
 
-def _sampling_case(frames=345, margins=0, alternate=False, zero_negative=False):
+def _sampling_case(frames=345, margins=0, alternate=False, zero_negative=False, cfg=2.0, disable_cfg1=False):
     kwargs, clip, vv, av = _inputs(frames)
     positive, latent = R.H3LongReferenceToVideo.execute(**kwargs)
     marker = positive[0][1]["model_conds"][R.REFERENCE_KEY]
@@ -165,7 +170,7 @@ def _sampling_case(frames=345, margins=0, alternate=False, zero_negative=False):
     handler = H3ContextHandler(G.frames_to_tokens(141), 15, phase_alternate=alternate,
                                margin_tokens=margins)
     real = _model(shapes)
-    guider = SimpleNamespace(conds=original)
+    guider = SimpleNamespace(conds=original, cfg=cfg, model_options={"disable_cfg1_optimization": disable_cfg1})
     patcher = SimpleNamespace(load_device=torch.device("cpu"))
     expected_plan = R.planned_reference_windows(handler, shapes[0][2])
     seen = []
@@ -175,6 +180,13 @@ def _sampling_case(frames=345, margins=0, alternate=False, zero_negative=False):
             assert len(clip.calls) == 1 + len(expected_plan)
             return real, conds, []
         _, raw, _ = R.make_reference_prepare_wrapper()(load, patcher, noise.shape, guider.conds)
+        assert ("negative" in raw) == (zero_negative and (cfg != 1.0 or disable_cfg1))
+        if shapes[0][2] > handler.window_tokens:
+            tables = [cs[0]["model_conds"][R.REFERENCE_KEY].cond for cs in raw.values()]
+            if "negative" in raw:
+                zeros = raw["negative"][0]["model_conds"][R.REFERENCE_KEY].cond.windows
+                assert len({id(e.embeds) for e in zeros.values()}) == len({tuple(e.embeds.shape) for e in zeros.values()})
+            assert real.diffusion_model.calls == len({id(e.embeds) for table in tables for e in table.windows.values()})
         conds = [comfy.samplers.encode_model_conds(real.extra_conds, cs, noise, "cpu", branch,
                                                   latent_shapes=shapes)
                  for branch, cs in raw.items()]
@@ -214,6 +226,10 @@ def _sampling_case(frames=345, margins=0, alternate=False, zero_negative=False):
         for step in range(2):
             outputs = handler.execute(calc, real, conds, noise, sigmas[step:step + 1], options)
             assert all(torch.allclose(out, -noise, atol=1e-5) for out in outputs)
+            assert len(handler._layout_cache) <= len(expected_plan) * len(conds)
+        cache_count = len(handler._layout_cache)
+        handler.execute(calc, real, conds, noise, sigmas[:1], options)
+        assert len(handler._layout_cache) == cache_count
         assert set(seen) == set(expected_plan)
         return noise
 
@@ -232,6 +248,8 @@ def test_reference_sampling_and_cache():
     _sampling_case(alternate=True, margins=5, zero_negative=True)
     _sampling_case(margins=5)
     _sampling_case(frames=90)
+    _sampling_case(zero_negative=True, cfg=1.0)
+    _sampling_case(zero_negative=True, cfg=1.0, disable_cfg1=True)
 
 
 def test_reference_validation_and_optional_vaes():
@@ -255,7 +273,7 @@ def test_reference_cleanup_and_memory_budget():
     kwargs, _, _, _ = _inputs()
     positive, latent = R.H3LongReferenceToVideo.execute(**kwargs)
     original = {"positive": comfy.sampler_helpers.convert_cond(positive)}
-    guider = SimpleNamespace(conds=original)
+    guider = SimpleNamespace(conds=original, cfg=2.0, model_options={})
     handler = H3ContextHandler(42, 15)
     noise, shapes = comfy.utils.pack_latents(list(latent["samples"].unbind()))
 
@@ -299,11 +317,163 @@ def test_reference_native_sampler():
     positive, latent = R.H3LongReferenceToVideo.execute(**kwargs)
     noise = comfy.nested_tensor.NestedTensor([torch.randn_like(z) for z in latent["samples"].unbind()])
     negative = [[torch.zeros_like(positive[0][0]), positive[0][1].copy()]]
-    result = comfy.samplers.sample(patched, noise, positive, negative, 1.0, torch.device("cpu"),
-                                   comfy.samplers.sampler_object("euler"), torch.tensor([1.0, 0.5, 0.0]),
-                                   model_options=patched.model_options, latent_image=latent["samples"], seed=721)
-    assert result.is_nested
-    assert [z.shape for z in result.unbind()] == [z.shape for z in noise.unbind()]
-    assert all(torch.isfinite(z).all() for z in result.unbind())
-    assert len(clip.calls) == len(vv.calls) == len(av.calls) == 3
-    assert not patched.model_options["context_handler"]._payload_cache
+    # Two separate native sampler calls with the same conditioning, as SelfLift
+    # uses for its low/high passes. The second call doubles the spatial grid.
+    for scale in (1, 2):
+        streams = list(latent["samples"].unbind())
+        if scale == 2:
+            streams[0] = torch.nn.functional.interpolate(streams[0], scale_factor=(1, 2, 2), mode="nearest")
+        stage_latent = comfy.nested_tensor.NestedTensor(streams)
+        noise = comfy.nested_tensor.NestedTensor([torch.randn_like(z) for z in streams])
+        result = comfy.samplers.sample(patched, noise, positive, negative, 1.0, torch.device("cpu"),
+                                       comfy.samplers.sampler_object("euler"), torch.tensor([1.0, 0.5, 0.0]),
+                                       model_options=patched.model_options, latent_image=stage_latent, seed=721)
+        assert result.is_nested
+        assert [z.shape for z in result.unbind()] == [z.shape for z in noise.unbind()]
+        assert all(torch.isfinite(z).all() for z in result.unbind())
+        assert len(clip.calls) == len(vv.calls) == len(av.calls) == 3
+        assert not patched.model_options["context_handler"]._payload_cache
+
+
+def test_reference_source_memory():
+    kwargs, _, _, _ = _inputs(362)
+    kwargs["length"] = 243
+    video_ref = weakref.ref(kwargs["ref_videos"]["ref_video_1"])
+    waveform = kwargs["ref_video_audios"]["ref_video_audio_1"]["waveform"]
+    audio_ref = weakref.ref(waveform)
+    with patch.object(R.native, "_resize", wraps=R.native._resize) as resize:
+        positive, _ = R.H3LongReferenceToVideo.execute(**kwargs)
+        source = positive[0][1]["model_conds"][R.REFERENCE_KEY].cond
+        assert resize.call_count == 1 and resize.call_args.args[0].shape[0] == 1
+        source.encode_window(15, 37)
+        assert resize.call_count == 1  # Video windows read the prepared bytes without another resize.
+    cached = source.videos["ref_video_1"]
+    assert cached.length == 243
+    assert cached.file.seek(0, 2) == 243 * 32 * 32 * 3
+    track = source.soundtracks["ref_video_audio_1"]["waveform"]
+    assert track.untyped_storage().nbytes() == 243 * 10 * 2 * 4
+    assert track.untyped_storage().data_ptr() != waveform.untyped_storage().data_ptr()
+    kwargs["ref_videos"].clear()
+    kwargs["ref_video_audios"].clear()
+    del waveform
+    gc.collect()
+    assert video_ref() is None and audio_ref() is None
+    assert torch.equal(_frame_numbers(cached.read(119, 124)), torch.arange(119, 243).float())
+
+    # Preserve native pixels exactly, including clamp, Lanczos, RGB extraction,
+    # float16 conversion, and non-contiguous source frame views.
+    for dtype in (torch.float32, torch.float16):
+        frames = (torch.rand(27, 67, 99, 4, dtype=dtype) * 1.2 - 0.1)[::2]
+        cache = R.ReferenceVideo(frames, 12)
+        expected = native._resize(frames[2:12:3], cache.width, cache.height, "disabled")
+        torch.testing.assert_close(cache.read(2, 10, 3), expected, rtol=0, atol=0)
+        cache.file.close()
+    handle = R.tempfile.TemporaryFile()
+    with patch.object(R.tempfile, "TemporaryFile", return_value=handle), \
+         patch.object(R.comfy.model_management, "throw_exception_if_processing_interrupted",
+                      side_effect=[None, RuntimeError("cancel cache")]):
+        try:
+            R.ReferenceVideo(_frames(5), 5)
+        except RuntimeError as error:
+            assert str(error) == "cancel cache"
+        else:
+            raise AssertionError("Cache construction did not cancel")
+    assert handle.closed
+
+
+def test_reference_cross_pass_cache():
+    kwargs, clip, vv, av = _inputs(192)
+    positive, latent = R.H3LongReferenceToVideo.execute(**kwargs)
+    source = positive[0][1]["model_conds"][R.REFERENCE_KEY].cond
+    handler = H3ContextHandler(42, 15)
+    plan = R.planned_reference_windows(handler, G.frames_to_tokens(192))
+    transient = []
+
+    for scale, offset in ((1, 0.25), (2, 1.25)):
+        streams = list(latent["samples"].unbind())
+        if scale == 2:
+            streams[0] = torch.nn.functional.interpolate(streams[0], scale_factor=(1, 2, 2), mode="nearest")
+        noise, shapes = comfy.utils.pack_latents(streams)
+        real = _model(shapes, offset)
+        # Match SelfLift's tuple conditioning copies; metadata keeps the source.
+        original = {"positive": comfy.sampler_helpers.convert_cond([(t, d) for t, d in positive])}
+        guider = SimpleNamespace(conds=original, cfg=1.0, model_options={})
+        patcher = SimpleNamespace(load_device=torch.device("cpu"))
+
+        def sampling(noise, latent_image, sampler, sigmas, **kw):
+            raw = guider.conds
+            table = raw["positive"][0]["model_conds"][R.REFERENCE_KEY].cond
+            assert all(e.embeds.shape[-1] == 8 for e in table.windows.values())
+            transient.extend(weakref.ref(e.embeds) for e in table.windows.values())
+            R.make_reference_prepare_wrapper()(lambda *a, **k: (real, raw, []), patcher, noise.shape, raw)
+            assert real.diffusion_model.calls == len(plan)
+            for key, entry in table.windows.items():
+                assert entry.embeds.shape[-1] == 12
+                assert entry.embeds[0, 0, 0] == G.token_frame_offset(key[0]) + offset
+                assert entry.refs[0] is source.image_refs[0] and entry.refs[-1] is source.audio_refs[0]
+                # H3-refined tensors must never replace the raw disk cache.
+                cached = source.encoding_cache.load("text", key)
+                assert cached["embeds"].shape[-1] == 8
+                assert cached["embeds"][0, 0, 0] == G.token_frame_offset(key[0])
+                assert all(ref["kind"] not in ("image", "audio")
+                           for ref in source.encoding_cache.load("refs", key))
+            transient.extend(weakref.ref(e.embeds) for e in table.windows.values())
+            return noise
+
+        executor = comfy.patcher_extension.WrapperExecutor.new_class_executor(
+            sampling, guider, [R.make_reference_sampling_wrapper(handler)])
+        executor.execute(noise, noise, None, torch.tensor([1.0, 0.0]), latent_shapes=shapes)
+        assert guider.conds is original
+        assert len(clip.calls) == len(vv.calls) == len(av.calls) == 1 + len(plan)
+        gc.collect()
+        assert all(ref() is None for ref in transient)
+
+    shifted = R.planned_reference_windows(H3ContextHandler(42, 15, phase_alternate=True), G.frames_to_tokens(192))
+    expected = set(plan) | set(shifted)
+    source.prepare_windows(shifted)
+    assert len(clip.calls) == len(vv.calls) == len(av.calls) == 1 + len(expected)
+    assert len(source.encoding_cache.paths) == 2 * len(expected)
+    assert all(isinstance(path, Path) for path in source.encoding_cache.paths.values())
+
+    # A separate reference-node result has an independent cache.
+    kwargs["prompt"] = "A different prompt"
+    another, _ = R.H3LongReferenceToVideo.execute(**kwargs)
+    other_source = another[0][1]["model_conds"][R.REFERENCE_KEY].cond
+    assert other_source.encoding_cache.directory.name != source.encoding_cache.directory.name
+    other_source.prepare_windows(plan)
+    assert len(clip.calls) == 2 + len(expected) + len(plan)
+
+
+def test_reference_encoding_cache_lifecycle():
+    cache = R.WindowEncodingCache()
+    directory = Path(cache.directory.name)
+    tensor = torch.randn(1, 4, 8, dtype=torch.bfloat16)
+    reference = weakref.ref(tensor)
+    cache.store("text", (0, 7), {"embeds": tensor, "tags": torch.arange(4)})
+    expected = tensor.clone()
+    del tensor
+    gc.collect()
+    assert reference() is None  # No encoded tensors retained by the persistent cache.
+    restored = cache.load("text", (0, 7))
+    torch.testing.assert_close(restored["embeds"], expected, rtol=0, atol=0)
+    assert restored["embeds"].device.type == "cpu"
+
+    def failed_save(data, path):
+        Path(path).write_bytes(b"partial write")
+        raise RuntimeError("cancel encoding cache")
+
+    with patch.object(R.torch, "save", side_effect=failed_save):
+        try:
+            cache.store("refs", (0, 7), [])
+        except RuntimeError as error:
+            assert str(error) == "cancel encoding cache"
+        else:
+            raise AssertionError("Cache write did not fail")
+    assert not cache.contains("refs", (0, 7))
+    assert not (directory / "refs-0-7.pt").exists()
+    assert cache.contains("text", (0, 7))
+    cache.store("refs", (0, 7), [])
+    assert cache.load("refs", (0, 7)) == []
+    del cache
+    gc.collect()
+    assert not directory.exists()

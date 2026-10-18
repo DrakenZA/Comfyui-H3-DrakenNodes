@@ -201,11 +201,13 @@ class H3ContextHandler(cw.IndexListContextHandler):
             if not isinstance(mc, dict):
                 continue
             target_origin = None
+            payload_cache_id = None
             reference = mc.pop(REFERENCE_KEY, None)
             if reference is not None:
                 table = reference.cond
                 entry = table.windows[(window.index_list[0], len(window.index_list))]
                 mc["c_crossattn"] = comfy.conds.CONDRegular(entry.embeds.to(x_in.device))
+                payload_cache_id = id(mc["minimax_payload"].cond)
                 payload = dict(mc["minimax_payload"].cond)
                 payload.update(refs=entry.refs, text_token_tags=entry.tags)
                 mc["minimax_payload"] = comfy.conds.CONDConstant(payload)
@@ -220,7 +222,7 @@ class H3ContextHandler(cw.IndexListContextHandler):
                 if ca is not None and isinstance(getattr(ca, "cond", None), torch.Tensor):
                     text_len = int(ca.cond.shape[1])
                 mc["minimax_payload"] = comfy.conds.CONDConstant(
-                    self._window_payload(pl.cond, window, audio_window, x_in, text_len, target_origin))
+                    self._window_payload(pl.cond, window, audio_window, x_in, text_len, target_origin, payload_cache_id))
         return resized
 
     def _warn_once(self, key, msg):
@@ -344,7 +346,7 @@ class H3ContextHandler(cw.IndexListContextHandler):
         self._layout_cache[sig] = layout
         return layout
 
-    def _window_payload(self, payload, window, audio_window, x_in, text_len, target_origin=None):
+    def _window_payload(self, payload, window, audio_window, x_in, text_len, target_origin=None, payload_cache_id=None):
         s = window.index_list[0]
         L = len(window.index_list)
         f0 = window.h3_frame_start
@@ -352,7 +354,7 @@ class H3ContextHandler(cw.IndexListContextHandler):
         a_len = len(audio_window.index_list)
         src_keyframes = list(payload.get("keyframes") or [])
         refs = payload.get("refs")
-        sig = (id(payload), s, L, text_len, a0, a_len,
+        sig = (id(payload) if payload_cache_id is None else payload_cache_id, s, L, text_len, a0, a_len,
                tuple((int(kf["resolved_frame_index"]), id(kf.get("latent")), id(kf.get("audio_latent")))
                      for kf in src_keyframes),
                id(refs), target_origin)

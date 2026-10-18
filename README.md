@@ -132,10 +132,39 @@ The context handler reads the reference metadata and prepares its actual window
 plan before denoising, including phase alternation and margins. It encodes matching
 source video/audio segments with the native VAEs and builds Qwen conditioning from
 each segment's 2 fps presentation. Images and standalone audio references are shared.
-VAE work is completed before the Qwen pass; Qwen embeddings and reference latents
-are cached on CPU for this sampling run. The H3 text projection/refiner is also
-computed once per window, after the diffusion model loads. Window conditioning is
-reused at every denoising step and discarded after sampling or cancellation.
+VAE work is completed before the Qwen pass. Raw video/audio reference latents,
+Qwen embeddings, and token tags are saved to a temporary disk cache owned by this
+reference-node result. Matching windows reuse those encodings on subsequent sampler
+calls, including SelfLift's low- and high-resolution passes, without changing
+SelfLift. A different window plan encodes only missing windows; different prompts,
+source inputs, or encoders produce independent reference-node results and caches.
+Shared image and standalone-audio reference latents are not duplicated in each
+window file.
+
+Each sampler call loads its active window encodings onto CPU. The H3 text
+projection/refiner is computed after that pass's diffusion model loads, so a
+different high-resolution model or LoRA stack receives its own refinement. Refined
+embeddings are never written over the raw Qwen disk cache. Active conditioning is
+reused at every denoising step and released after sampling or cancellation; the
+disk cache remains reusable until its reference conditioning leaves the node cache
+or the process exits. Failed writes are removed and retried on the next call.
+
+Source video pixels are resized one frame at a time into temporary disk storage,
+limited to the requested length. The RGB bytes preserve the stock Lanczos result
+exactly (the stock resize already converts to 8-bit). Only the active VAE window
+or the sampled Qwen frames are materialized as float tensors. Temporary files are
+deleted when their conditioning leaves the node cache or the process exits;
+rerunning a cached conditioning can reuse them. Paired audio is cropped into compact
+storage. This node no longer retains the original input video tensor, although an
+upstream loader's own IMAGE cache can still retain it. Temporary disk usage is
+`frames * reference_width * reference_height * 3` bytes per source video.
+
+At CFG 1, negative-window preparation is skipped unless
+`disable_cfg1_optimization` requests the negative branch. For active zeroed
+conditionings, equal-sized embeddings and their H3 refinement are shared across
+windows. Refined presentations are reused by native conditioning preparation, and
+layout caches use stable identities across denoising steps. Logs report how many
+VAE and Qwen windows are reused before preparing any misses.
 
 Source frames must **already be 24 fps**; this node does not resample time. Every
 reference video and paired soundtrack must cover the requested `length`, rounded
