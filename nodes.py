@@ -14,6 +14,7 @@ from comfy_api.latest import io
 from . import h3_grid as G
 from . import progressive as P
 from .handler import H3ContextHandler, make_prepare_sampling_wrapper
+from .long_reference import H3LongReferenceToVideo, make_reference_sampling_wrapper, make_reference_prepare_wrapper
 from .face_occlusion import FaceOcclusionMask
 from .face_squares import FaceMaskSquares
 from .face_highlighter import FaceMaskHighlighter
@@ -107,11 +108,13 @@ class H3ContextWindows:
                                    margin_tokens=margin_tokens)
         m = model.clone()
         m.model_options["context_handler"] = handler
-        if expected_total_frames and expected_total_frames > 0:
-            total_tokens = G.frames_to_tokens(G.align_frames_up(expected_total_frames))
-            m.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.PREPARE_SAMPLING,
-                                   "H3ContextWindows_prepare_sampling",
-                                   make_prepare_sampling_wrapper(handler, total_tokens))
+        total_tokens = G.frames_to_tokens(G.align_frames_up(expected_total_frames)) if expected_total_frames > 0 else 0
+        m.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.OUTER_SAMPLE,
+                               "H3ContextWindows_long_reference", make_reference_sampling_wrapper(handler))
+        m.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.PREPARE_SAMPLING,
+                               "H3ContextWindows_prepare_sampling", make_prepare_sampling_wrapper(handler, total_tokens))
+        m.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.PREPARE_SAMPLING,
+                               "H3ContextWindows_reference_embeds", make_reference_prepare_wrapper())
         if freenoise:
             comfy.context_windows.create_sampler_sample_wrapper(m)
         wf = G.tokens_to_frames(L)
@@ -672,6 +675,7 @@ class H3ProgressiveSampler(io.ComfyNode):
 
 
 NODE_CLASS_MAPPINGS = {
+    "DrakenH3LongReferenceToVideo": H3LongReferenceToVideo,
     "DrakenPersonSelection": PersonSelection,
     "DrakenPersonVideoMask": PersonVideoMask,
     "DrakenPersonMaskOverlay": PersonMaskOverlay,
@@ -689,6 +693,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "DrakenH3LongReferenceToVideo": "H3 Long Reference to Video (Draken)",
     "DrakenPersonSelection": "Person Selection (Draken)",
     "DrakenPersonVideoMask": "Person Video Mask (Draken)",
     "DrakenPersonMaskOverlay": "Person Mask Overlay (Draken)",

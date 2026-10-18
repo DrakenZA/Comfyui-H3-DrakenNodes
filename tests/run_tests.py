@@ -74,6 +74,7 @@ def main():
     import test_nodes_cpu
     import test_extras_cpu
     import test_progressive_cpu
+    import test_long_reference_cpu
     test_grid.test_basic_grid()
     test_grid.test_plan()
     test_handler_cpu.test_identity_and_phase()
@@ -93,6 +94,11 @@ def main():
     test_progressive_cpu.test_any_sampler_multi_stage_image()
     test_progressive_cpu.test_noise_mask_keeps_content()
     test_progressive_cpu.test_nested_av_stages_and_node()
+    test_long_reference_cpu.test_reference_schema_and_segments()
+    test_long_reference_cpu.test_reference_sampling_and_cache()
+    test_long_reference_cpu.test_reference_validation_and_optional_vaes()
+    test_long_reference_cpu.test_reference_cleanup_and_memory_budget()
+    test_long_reference_cpu.test_reference_native_sampler()
     print("ALL TESTS OK")
 
 

@@ -111,6 +111,7 @@ All five nodes are under **Add Node → DrakenNodes → H3** (search "Draken" or
 | Node | What it does |
 | --- | --- |
 | **H3 Context Windows (Draken)** (model patch) | Installs the handler. `window_frames` (default 141 = 5.9 s), `stride_frames` (default 51), fuse method, phase alternation, FreeNoise, per-region prompts. `expected_total_frames` lets it budget VRAM per window instead of per full latent. Outputs an info string. |
+| **H3 Long Reference to Video (Draken)** | Mirrors the stock reference node's inputs and `positive` / `latent` outputs. With H3 Context Windows, each target window receives matching source-video and soundtrack segments through both Qwen and the VAEs. Image references and standalone audio stay global. |
 | **H3 Latent with Extend (Draken)** | Builds the long empty AV latent (snapped to `17k+5`, and with `snap_length_to_audio_grid` to an audio-exact length). Three ways to seed it: `prefix_latent` (a previous H3 AV latent, e.g. the last KSampler output; its tail is copied straight in, no VAEs), or `prefix_frames` + `vae` (footage encoded), optionally with `prefix_audio` + `audio_vae`. The last `prefix_context_frames` (default 39) become a hard masked prefix, with optional feathering. Audio is only taken when something is wired into `prefix_audio` / from the latent; otherwise H3 generates it. Outputs the latent, the number of prefix frames to trim later, and an info string. |
 | **H3 Inject Extend (Draken)** | The same prefix logic applied to a latent you already have (Empty MiniMax H3 AV Latent, the stock Image/Reference to Video latent, a previous render). Size and length come from that latent; an existing noise mask is kept and combined. Same `prefix_latent` / `prefix_frames` + `prefix_audio` inputs. |
 | **H3 Negative Guide (Draken)** | Anchors a guide clip *before* frame 0 as a keyframe on the conditioning (negative frame index), so the clip continues from it on the target grid without touching the latent. Stock Add Guide cannot do this (negative means "from the end" there). Source: a previous latent's tail, or frames (+ audio) encoded. `gap_frames` leaves empty time before the clip. With context windows the guide is given to the first window only. |
@@ -118,6 +119,48 @@ All five nodes are under **Add Node → DrakenNodes → H3** (search "Draken" or
 | **H3 Window Plan (Draken)** | Prints the window schedule for a length / window / stride, or (`windows -> length`) the audio-exact length that gives N clean windows with no clamped last window. |
 | **H3 Trim Prefix Content (Draken)** | Drops the footage prefix from decoded frames and audio (exact), or from an H3 AV latent (cut on the 17-frame token grid; `remaining_frames` tells you what is left to trim after decoding). |
 | **H3 Progressive Sampler, multi-stage SelfLift (Draken)** | Progressive-resolution sampling after [SelfLift](https://github.com/facok/comfyui-SelfLift) ([paper](https://arxiv.org/abs/2609.02036)), generalised to any sampler and 2-8 stages. See below. |
+
+## Long reference videos
+
+Replace **MiniMax H3 Reference to Video** with **H3 Long Reference to Video (Draken)**.
+The inputs are the same, including expandable image/video/audio references and
+`ref_image_size`; the outputs remain `positive` and `latent`. Connect both outputs
+to the sampler, and put **H3 Context Windows (Draken)** on its model branch.
+No extra wire or duplicate window settings are needed.
+
+The context handler reads the reference metadata and prepares its actual window
+plan before denoising, including phase alternation and margins. It encodes matching
+source video/audio segments with the native VAEs and builds Qwen conditioning from
+each segment's 2 fps presentation. Images and standalone audio references are shared.
+VAE work is completed before the Qwen pass; Qwen embeddings and reference latents
+are cached on CPU for this sampling run. The H3 text projection/refiner is also
+computed once per window, after the diffusion model loads. Window conditioning is
+reused at every denoising step and discarded after sampling or cancellation.
+
+Source frames must **already be 24 fps**; this node does not resample time. Every
+reference video and paired soundtrack must cover the requested `length`, rounded
+up to H3's `17k+5` frame grid. Source and target time map 1:1, beginning at frame 0.
+Use the node's latent output or another H3 latent of the same length. Reference
+image sizing and optional-VAE behavior match the stock node. With no reference
+videos, the node uses the stock implementation directly.
+
+For windowed references, the target RoPE origin is held constant across the plan
+before adding each window's absolute offset, so variable Qwen presentation lengths
+and edge margins do not shift overlapping target frames. Existing guide remapping,
+halo conditioning, and fusion still apply. `Conditioning Combine` and
+`Conditioning Zero Out` are supported; other embedding edits are rejected rather
+than silently overwritten. `split_conds_to_windows` selects the corresponding
+conditioning entry as before. Target VRAM budgeting uses the actual target length
+automatically for these references; CPU cache storage and preparation time grow
+with the number of windows. A video reference requires the Draken context node,
+even for a clip shorter than one window.
+
+[API workflow example](example_workflows/h3_long_reference_api.json): replace model
+and input filenames, supply a 24 fps source covering 753 frames, or adjust `length`
+to your footage. The workflow references source audio; omit `ref_video_audio_1` for
+silent footage. CPU tests verify native segment equivalence, timing, window
+selection, layouts, caching, and cleanup. **Real H3 render quality and GPU memory
+use are not yet verified.**
 
 ## H3 Progressive Sampler (multi-stage SelfLift)
 

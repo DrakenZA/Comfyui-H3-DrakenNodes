@@ -42,6 +42,7 @@ import comfy.utils
 from comfy.ldm.minimax.model import FRAME_RESCALE, PackedLayout
 
 from . import h3_grid as G
+from .long_reference import REFERENCE_KEY
 
 VIDEO_DIM = 2
 AUDIO_DIM = 3
@@ -199,6 +200,16 @@ class H3ContextHandler(cw.IndexListContextHandler):
             mc = c.get("model_conds")
             if not isinstance(mc, dict):
                 continue
+            target_origin = None
+            reference = mc.pop(REFERENCE_KEY, None)
+            if reference is not None:
+                table = reference.cond
+                entry = table.windows[(window.index_list[0], len(window.index_list))]
+                mc["c_crossattn"] = comfy.conds.CONDRegular(entry.embeds.to(x_in.device))
+                payload = dict(mc["minimax_payload"].cond)
+                payload.update(refs=entry.refs, text_token_tags=entry.tags)
+                mc["minimax_payload"] = comfy.conds.CONDConstant(payload)
+                target_origin = table.target_origin
             am = mc.get("audio_denoise_mask")
             if am is not None and hasattr(am, "cond") and isinstance(am.cond, torch.Tensor):
                 mc["audio_denoise_mask"] = am._copy_with(audio_window.get_tensor(am.cond, device, dim=AUDIO_DIM))
@@ -209,7 +220,7 @@ class H3ContextHandler(cw.IndexListContextHandler):
                 if ca is not None and isinstance(getattr(ca, "cond", None), torch.Tensor):
                     text_len = int(ca.cond.shape[1])
                 mc["minimax_payload"] = comfy.conds.CONDConstant(
-                    self._window_payload(pl.cond, window, audio_window, x_in, text_len))
+                    self._window_payload(pl.cond, window, audio_window, x_in, text_len, target_origin))
         return resized
 
     def _warn_once(self, key, msg):
@@ -313,15 +324,18 @@ class H3ContextHandler(cw.IndexListContextHandler):
                 blocks.append((G.token_frame_offset(s + L) - f0, s + L, t1))
         return blocks
 
-    def _layout_for(self, sig, text_len, L, lat_h, lat_w, a_len, keyframes, refs, f0):
+    def _layout_for(self, sig, text_len, L, lat_h, lat_w, a_len, keyframes, refs, f0, target_origin=None):
         layout = self._layout_cache.get(sig)
         if layout is not None:
             return layout
         layout = PackedLayout(text_len, L, lat_h, lat_w, a_len, keyframes=keyframes or None, refs=refs)
-        if self.absolute_positions and f0 > 0:
+        if target_origin is not None or (self.absolute_positions and f0 > 0):
             # both grids are affine in the cursor, so shifting the finished table's time column is
             # identical to building the window from a later cursor; refs and text stay where they are
-            off = FRAME_RESCALE * float(f0)
+            off = FRAME_RESCALE * float(f0) if self.absolute_positions else 0.0
+            if target_origin is not None:
+                va = next(a for a, _, kind in layout.segments if kind == "video")
+                off += target_origin - float(layout.position_ids[va, 0])
             for a, b, kind in layout.segments:
                 if kind in ("video", "audio", "cond", "cond_audio"):
                     layout.position_ids[a:b, 0] += off
@@ -330,7 +344,7 @@ class H3ContextHandler(cw.IndexListContextHandler):
         self._layout_cache[sig] = layout
         return layout
 
-    def _window_payload(self, payload, window, audio_window, x_in, text_len):
+    def _window_payload(self, payload, window, audio_window, x_in, text_len, target_origin=None):
         s = window.index_list[0]
         L = len(window.index_list)
         f0 = window.h3_frame_start
@@ -341,7 +355,7 @@ class H3ContextHandler(cw.IndexListContextHandler):
         sig = (id(payload), s, L, text_len, a0, a_len,
                tuple((int(kf["resolved_frame_index"]), id(kf.get("latent")), id(kf.get("audio_latent")))
                      for kf in src_keyframes),
-               id(refs))
+               id(refs), target_origin)
         base = self._payload_cache.get(sig)
         if base is None:
             base = self._base_keyframes(payload, window, audio_window)
@@ -372,7 +386,7 @@ class H3ContextHandler(cw.IndexListContextHandler):
             lat_h = (int(x_in.shape[3]) + 1) // 2 * 2
             lat_w = (int(x_in.shape[4]) + 1) // 2 * 2
             halo_key = tuple((local, t1 - t0) for local, t0, t1 in halo)
-            new["layout"] = self._layout_for(sig + (halo_key,), text_len, L, lat_h, lat_w, a_len, keyframes, refs, f0)
+            new["layout"] = self._layout_for(sig + (halo_key,), text_len, L, lat_h, lat_w, a_len, keyframes, refs, f0, target_origin)
         new["h3_window_start_frame"] = f0
         return new
 
@@ -512,7 +526,13 @@ def make_prepare_sampling_wrapper(handler: H3ContextHandler, expected_total_toke
     """Budget VRAM for one window instead of the whole packed latent (core skips packed latents)."""
     def wrapper(executor, model, noise_shape, conds, *args, **kwargs):
         shape = list(noise_shape)
-        if expected_total_tokens > handler.window_tokens and len(shape) == 3:
-            shape[-1] = max(1, int(shape[-1] * handler.window_tokens / expected_total_tokens))
+        total = expected_total_tokens
+        for cs in (conds or {}).values():
+            for c in cs:
+                reference = c.get("model_conds", {}).get(REFERENCE_KEY)
+                if reference is not None:
+                    total = reference.cond.total_tokens
+        if total > handler.window_tokens and len(shape) == 3:
+            shape[-1] = max(1, int(shape[-1] * handler.window_tokens / total))
         return executor(model, shape, conds, *args, **kwargs)
     return wrapper
