@@ -1,0 +1,9 @@
+{
+  "1": {"class_type": "LoadVideo", "inputs": {"file": "sharp_480p_39frames.mp4"}},
+  "2": {"class_type": "GetVideoComponents", "inputs": {"video": ["1", 0]}},
+  "3": {"class_type": "VAELoader", "inputs": {"vae_name": "REPLACE_WITH_H3_VIDEO_VAE.safetensors"}},
+  "4": {"class_type": "VAEEncode", "inputs": {"pixels": ["2", 0], "vae": ["3", 0]}},
+  "5": {"class_type": "VAEDecode", "inputs": {"samples": ["4", 0], "vae": ["3", 0]}},
+  "6": {"class_type": "SaveImage", "inputs": {"images": ["2", 0], "filename_prefix": "h3_vae/source/frame"}},
+  "7": {"class_type": "SaveImage", "inputs": {"images": ["5", 0], "filename_prefix": "h3_vae/reconstruction/frame"}}
+}

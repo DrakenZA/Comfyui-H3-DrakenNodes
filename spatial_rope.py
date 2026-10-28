@@ -7,7 +7,7 @@ import torch
 
 PATCH_KEY = "DrakenH3SpatialRoPE"
 MODES = ("static", "smooth_ramp")
-SCOPES = ("all_visual", "target_and_guides")
+SCOPES = ("target_only", "all_visual", "target_and_guides")
 
 
 def sampling_progress(timestep, schedule):
@@ -39,7 +39,9 @@ def scale_layout(layout, scale, scope):
         return layout
     out = copy.copy(layout)
     out.position_ids = layout.position_ids.clone()
-    kinds = {"video", "cond"}
+    kinds = {"video"}
+    if scope != "target_only":
+        kinds.add("cond")
     if scope == "all_visual":
         kinds.add("ref_img")  # H3 uses this kind for both image and video refs.
     for a, b, kind in layout.segments:
@@ -86,7 +88,7 @@ class SpatialRoPEPatch:
 
 
 def patch_model(model, spatial_scale=1.0, mode="static", ramp_start=0.4,
-                ramp_end=0.9, reference_scope="all_visual"):
+                ramp_end=0.9, reference_scope="target_only"):
     if not math.isfinite(spatial_scale) or not 0.5 <= spatial_scale <= 1.5:
         raise ValueError("H3 Spatial RoPE spatial_scale must be finite and between 0.5 and 1.5.")
     if mode not in MODES or reference_scope not in SCOPES:
@@ -123,8 +125,8 @@ class H3SpatialRoPE:
                 "tooltip": "Smooth ramp only: sampling progress where scale begins leaving 1.0."}),
             "ramp_end": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.05,
                 "tooltip": "Smooth ramp only: sampling progress where the chosen scale is reached and held."}),
-            "reference_scope": (list(SCOPES), {"default": "all_visual",
-                "tooltip": "all_visual scales target, guides, image/video references. target_and_guides leaves reference coordinates native. Audio/text/time coordinates stay native in both modes."}),
+            "reference_scope": (list(SCOPES), {"default": "target_only",
+                "tooltip": "target_only changes only target video positions. target_and_guides also scales guides; all_visual also scales image/video references. Text/audio/time stay native in every mode. Saved workflows retain their selected scope."}),
         }}
 
     RETURN_TYPES = ("MODEL", "STRING")
@@ -134,7 +136,7 @@ class H3SpatialRoPE:
     DESCRIPTION = "Experimental spatial RoPE scaling at unchanged resolution/token count. May alter framing, motion and audio through joint attention. No proven detail gain."
 
     def apply(self, model, spatial_scale=1.0, mode="static", ramp_start=0.4,
-              ramp_end=0.9, reference_scope="all_visual"):
+              ramp_end=0.9, reference_scope="target_only"):
         patched = patch_model(model, spatial_scale, mode, ramp_start, ramp_end, reference_scope)
         info = ("H3 Spatial RoPE: native bypass (1.0)" if spatial_scale == 1.0 else
                 f"H3 Spatial RoPE: {spatial_scale:.3f}x; {mode}; {reference_scope}")

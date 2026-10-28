@@ -24,10 +24,12 @@ as usual. No special sampler is required. Restart ComfyUI to load the new node.
   interpolate between entries. A partial denoise run uses its own supplied range.
   A single denoiser entry has progress zero. Missing schedules raise an error in
   ramp mode; static mode requires no schedule. Require start < end, both in [0,1].
-* `reference_scope`: **all_visual** scales the target, keyframes/guide clips and
-  image/video references together. **target_and_guides** keeps reference rows native
-  for a separate comparison. Both preserve text, all temporal coordinates and all
-  audio coordinates (including stereo spatial markers).
+* `reference_scope`: default **target_only** changes only target video rows;
+  keyframes, guides, image/video references, text and audio positions stay native.
+  **target_and_guides** also scales keyframes/guide clips. **all_visual** also scales
+  image/video references. All modes preserve temporal and audio coordinates
+  (including stereo spatial markers). Existing saved workflows retain their chosen
+  scope: select target_only explicitly when adopting this research protocol.
 
 Lower scale imitates closer neighbour spacing, but also shrinks the positional
 canvas. It does not give the model extra tokens or faithfully simulate 768p.
@@ -59,3 +61,6 @@ CPU tests use native ComfyUI layouts, patchers and a tiny randomly initialized H
 model. They verify coordinate isolation, ramps, output shape/finite values and
 that active scaling changes the computation. They do not establish visual quality
 or GPU performance.
+
+The full [research protocol](h3-low-resolution-research.md) separates VAE loss,
+token-budget effects, transformer position effects and sampling-schedule effects.

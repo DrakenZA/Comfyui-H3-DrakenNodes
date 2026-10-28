@@ -45,7 +45,7 @@ class SpatialRoPETests(unittest.TestCase):
                 self.assertIsNot(out, layout)
                 torch.testing.assert_close(out.position_ids[:, 0], before[:, 0], rtol=0, atol=0)
                 for a, b, kind in layout.segments:
-                    scaled = kind in ("video", "cond") or (scope == "all_visual" and kind == "ref_img")
+                    scaled = kind == "video" or (scope != "target_only" and kind == "cond") or (scope == "all_visual" and kind == "ref_img")
                     expected = 16 + 0.85 * (before[a:b, 1:] - 16) if scaled else before[a:b, 1:]
                     torch.testing.assert_close(out.position_ids[a:b, 1:], expected, rtol=0, atol=0)
                 torch.testing.assert_close(layout.position_ids, before, rtol=0, atol=0)
@@ -123,14 +123,19 @@ class SpatialRoPETests(unittest.TestCase):
         node_model, info = S.H3SpatialRoPE().apply(self.model)
         self.assertFalse(node_model.wrappers)
         self.assertIn("bypass", info)
+        self.assertEqual(S.H3SpatialRoPE.INPUT_TYPES()["required"]["reference_scope"][1]["default"], "target_only")
 
     def test_native_forward_baseline_and_active_scaling(self):
         x = [torch.randn(1, 24, 2, 4, 6), torch.randn(1, 32, 2, 3)]
         t, context = torch.tensor([500.]), torch.randn(1, 3, 12)
         image = {"kind": "image", "latent_h": 2, "latent_w": 2}
         image_latent = torch.randn(1, 24, 1, 2, 2)
-        layout = H.PackedLayout(3, 2, 4, 6, 3, refs=[image])
-        payload = {"refs": [image], "layout": layout, "cond_video_latents": [image_latent]}
+        guide = {"resolved_frame_index": 0, "latent": torch.randn(1, 24, 1, 4, 6),
+                 "audio_latent": torch.randn(1, 32, 2, 2)}
+        layout = H.PackedLayout(3, 2, 4, 6, 3, keyframes=[guide], refs=[image])
+        payload = {"refs": [image], "keyframes": [guide], "layout": layout,
+                   "cond_video_latents": [guide["latent"], image_latent],
+                   "cond_audio_latents": [guide["audio_latent"]]}
         saved = layout.position_ids.clone()
 
         def rms_rope(q, k, table, qw, kw, epsilon, rot_dim):
@@ -159,7 +164,7 @@ class SpatialRoPETests(unittest.TestCase):
             with patch.object(self.diffusion, "rope_freqs", wraps=self.diffusion.rope_freqs) as rope:
                 out = run(active)
                 self.assertEqual(rope.call_count, 1)
-                torch.testing.assert_close(rope.call_args.args[0], S.scale_layout(layout, 0.85, "all_visual").position_ids)
+                torch.testing.assert_close(rope.call_args.args[0], S.scale_layout(layout, 0.85, "target_only").position_ids)
             repeat = run(active)
             self.assertFalse(torch.allclose(baseline[0], out[0], rtol=1e-6, atol=1e-7))
             for a, b, original in zip(out, repeat, x):
@@ -178,6 +183,32 @@ class SpatialRoPETests(unittest.TestCase):
                             run(ramp, timestep=torch.tensor([100.]), sample_sigmas=schedule)):
                 torch.testing.assert_close(a, b, rtol=0, atol=0)
             torch.testing.assert_close(layout.position_ids, saved, rtol=0, atol=0)
+
+    def test_vae_workflow_contract(self):
+        import json
+        from pathlib import Path
+        import nodes
+        from comfy_extras import nodes_video
+        classes = dict(nodes.NODE_CLASS_MAPPINGS)
+        for cls in (nodes_video.LoadVideo, nodes_video.GetVideoComponents):
+            classes[cls.define_schema().node_id] = cls
+        path = Path(__file__).resolve().parents[1]/"example_workflows/h3_vae_roundtrip_api.json"
+        graph = json.loads(path.read_text())
+        schemas = {}
+        for key, node in graph.items():
+            cls = classes[node["class_type"]]
+            if hasattr(cls, "GET_NODE_INFO_V1"):
+                info = cls.GET_NODE_INFO_V1()
+                inputs, outputs = info["input"], info["output"]
+            else:
+                inputs, outputs = cls.INPUT_TYPES(), cls.RETURN_TYPES
+            self.assertTrue(set(inputs.get("required", {})) <= set(node["inputs"]))
+            schemas[key] = {**inputs.get("required", {}), **inputs.get("optional", {})}, outputs
+        for key, node in graph.items():
+            for name, value in node["inputs"].items():
+                self.assertIn(name, schemas[key][0])
+                if isinstance(value, list):
+                    self.assertEqual(schemas[value[0]][1][value[1]], schemas[key][0][name][0])
 
 
 def test_spatial_rope():
