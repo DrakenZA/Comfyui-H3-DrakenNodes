@@ -75,6 +75,7 @@ def main():
     import test_extras_cpu
     import test_progressive_cpu
     import test_long_reference_cpu
+    import test_spatial_rope_cpu
     test_grid.test_basic_grid()
     test_grid.test_plan()
     test_handler_cpu.test_identity_and_phase()
@@ -102,6 +103,7 @@ def main():
     test_long_reference_cpu.test_reference_source_memory()
     test_long_reference_cpu.test_reference_cross_pass_cache()
     test_long_reference_cpu.test_reference_encoding_cache_lifecycle()
+    test_spatial_rope_cpu.test_spatial_rope()
     print("ALL TESTS OK")
 
 

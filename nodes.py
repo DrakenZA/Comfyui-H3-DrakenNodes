@@ -19,6 +19,7 @@ from .face_occlusion import FaceOcclusionMask
 from .face_squares import FaceMaskSquares
 from .face_highlighter import FaceMaskHighlighter
 from .person_mask import PersonSelection, PersonVideoMask, PersonMaskOverlay
+from .spatial_rope import H3SpatialRoPE
 
 LOG = logging.getLogger("h3_context_windows")
 FUSE_METHODS = ["pyramid", "relative", "flat", "overlap-linear"]
@@ -675,6 +676,7 @@ class H3ProgressiveSampler(io.ComfyNode):
 
 
 NODE_CLASS_MAPPINGS = {
+    "DrakenH3SpatialRoPE": H3SpatialRoPE,
     "DrakenH3LongReferenceToVideo": H3LongReferenceToVideo,
     "DrakenPersonSelection": PersonSelection,
     "DrakenPersonVideoMask": PersonVideoMask,
@@ -693,6 +695,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "DrakenH3SpatialRoPE": "H3 Spatial RoPE (Draken, experimental)",
     "DrakenH3LongReferenceToVideo": "H3 Long Reference to Video (Draken)",
     "DrakenPersonSelection": "Person Selection (Draken)",
     "DrakenPersonVideoMask": "Person Video Mask (Draken)",

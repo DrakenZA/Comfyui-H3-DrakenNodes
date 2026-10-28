@@ -477,6 +477,13 @@ Available variants in the repo (sizes as listed on Hugging Face):
 An A100 80 GB runs the full int8 diffusion model plus the int8 text encoder. On a 40 GB card use a pruned 21 GB
 model and the nvfp4 text encoder. Colab's free T4 (15 GB) is too small for H3.
 
+## Experimental H3 spatial RoPE
+
+**H3 Spatial RoPE (Draken, experimental)** changes spatial rotary coordinates at
+the same output resolution/token count, with static scaling or a smooth sampling
+ramp. Default 1.0 is a native bypass. Start with 0.90, 0.85 and 1.10; visual quality
+and GPU performance are unverified. See [controls and test procedure](docs/h3-spatial-rope.md).
+
 ## Tests
 
 Person selector contracts run without ComfyUI or downloaded models:
